@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>KidneyIQ — Renal Health Dashboard</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <script src="{{ url_for('static', filename='jspdf.umd.min.js') }}"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
 </head>
 <body>
@@ -166,8 +167,34 @@
 
     <div class="dash-topbar">
       <span class="section-label">Results Dashboard</span>
-      <a href="/" class="new-assessment-link">← New Assessment</a>
+      <div class="topbar-actions">
+        <button class="download-btn" id="download-report-btn" onclick="downloadReport()">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 2v8M4 7l4 4 4-4M2 13h12"/>
+          </svg>
+          Download Report
+        </button>
+        <a href="/" class="new-assessment-link">← New Assessment</a>
+      </div>
     </div>
+
+    <!-- Hidden data for PDF generation -->
+    <div id="report-data" style="display:none"
+         data-score="{{ score_val if score_val is defined else 0 }}"
+         data-grade="{{ grade }}"
+         data-status="{{ status }}"
+         data-ckd-detected="{{ ckd_detected }}"
+         data-confidence="{{ confidence }}"
+         data-ckd-prob="{{ ckd_prob }}"
+         data-age="{{ age }}"
+         data-bp="{{ bp }}"
+         data-egfr="{{ egfr }}"
+         data-ckd-stage="{{ ckd_stage_info.stage if ckd_stage_info else '' }}"
+         data-ckd-stage-desc="{{ ckd_stage_info.desc if ckd_stage_info else '' }}"
+         data-markers='{{ markers | tojson }}'
+         data-tips='{{ tips | tojson }}'
+         data-penalties='{{ penalties | tojson }}'
+    ></div>
 
     {% if pdf_warning %}
     <div style="background:#fef3c7;border:1.5px solid #f59e0b;border-radius:10px;padding:14px 20px;margin-bottom:18px;display:flex;gap:12px;align-items:flex-start;">
@@ -412,6 +439,265 @@
       setTimeout(() => { bar.style.width = CKD_PROB + '%'; }, 200);
     }
   });
+
+  // ── PDF Report Download ────────────────────────────────────────────────
+  function downloadReport() {
+    const dataEl = document.getElementById('report-data');
+    if (!dataEl) return;
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const W = doc.internal.pageSize.getWidth();
+    const H = doc.internal.pageSize.getHeight();
+    const margin = 18;
+    const contentW = W - margin * 2;
+    let y = 0;
+
+    // Parse data
+    const score = dataEl.dataset.score;
+    const grade = dataEl.dataset.grade;
+    const status = dataEl.dataset.status;
+    const ckdDetected = dataEl.dataset.ckdDetected === 'True';
+    const confidence = dataEl.dataset.confidence;
+    const ckdProb = dataEl.dataset.ckdProb;
+    const age = dataEl.dataset.age;
+    const bp = dataEl.dataset.bp;
+    const egfr = dataEl.dataset.egfr;
+    const ckdStage = dataEl.dataset.ckdStage;
+    const ckdStageDesc = dataEl.dataset.ckdStageDesc;
+    const markers = JSON.parse(dataEl.dataset.markers || '[]');
+    const tips = JSON.parse(dataEl.dataset.tips || '[]');
+    const penalties = JSON.parse(dataEl.dataset.penalties || '{}');
+
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+
+    // Helper: check if we need a new page
+    function checkPage(needed) {
+      if (y + needed > H - 20) {
+        doc.addPage();
+        y = 20;
+      }
+    }
+
+    // ── Header Band ────────────────────────────────────────
+    doc.setFillColor(14, 165, 233);
+    doc.rect(0, 0, W, 38, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(20);
+    doc.setFont('helvetica', 'bold');
+    doc.text('KidneyIQ', margin, 16);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.text('Renal Health Analysis Report', margin, 24);
+    doc.setFontSize(8);
+    doc.text(`Generated: ${dateStr} at ${timeStr}`, W - margin, 16, { align: 'right' });
+    doc.text(`Patient: Age ${age}y  |  BP: ${bp} mmHg`, W - margin, 24, { align: 'right' });
+
+    y = 48;
+
+    // ── Section: Kidney Health Score ──────────────────────
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.text('KIDNEY HEALTH SCORE', margin, y);
+    y += 8;
+
+    // Score box
+    const scoreColor = score >= 85 ? [22,163,74] : score >= 70 ? [21,128,61] : score >= 55 ? [217,119,6] : score >= 35 ? [234,88,12] : [220,38,38];
+    doc.setFillColor(...scoreColor);
+    doc.roundedRect(margin, y, 50, 24, 3, 3, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(22);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`${score}`, margin + 25, y + 14, { align: 'center' });
+    doc.setFontSize(8);
+    doc.text('/100', margin + 25, y + 20, { align: 'center' });
+
+    // Grade & Status beside score
+    doc.setTextColor(15, 23, 42);
+    doc.setFontSize(14);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Grade ${grade} - ${status}`, margin + 58, y + 10);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100, 116, 139);
+    doc.text(`eGFR: ${egfr} mL/min  |  ${ckdStage} (${ckdStageDesc})`, margin + 58, y + 18);
+
+    y += 32;
+
+    // ── Section: CKD Screening ──────────────────────────
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.text('CKD SCREENING RESULT', margin, y);
+    y += 7;
+    doc.setFontSize(12);
+    if (ckdDetected) {
+      doc.setTextColor(220, 38, 38);
+      doc.text('(!) CKD Risk Detected', margin, y);
+    } else {
+      doc.setTextColor(22, 163, 74);
+      doc.text('[OK] No CKD Detected', margin, y);
+    }
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Model Confidence: ${confidence}%   |   CKD Probability: ${ckdProb}%`, margin + 75, y);
+    y += 12;
+
+    // ── Divider ────────────────────────────────────────────
+    doc.setDrawColor(221, 227, 236);
+    doc.setLineWidth(0.4);
+    doc.line(margin, y, W - margin, y);
+    y += 8;
+
+    // ── Section: Biomarker Table ──────────────────────────
+    checkPage(60);
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.text('BIOMARKER ANALYSIS', margin, y);
+    y += 7;
+
+    // Table header
+    const cols = [margin, margin + 50, margin + 82, margin + 112, margin + 140];
+    doc.setFillColor(240, 244, 248);
+    doc.rect(margin, y - 1, contentW, 7, 'F');
+    doc.setFontSize(7);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(100, 116, 139);
+    doc.text('MARKER', cols[0] + 2, y + 4);
+    doc.text('VALUE', cols[1] + 2, y + 4);
+    doc.text('NORMAL RANGE', cols[2] + 2, y + 4);
+    doc.text('STATUS', cols[3] + 2, y + 4);
+    doc.text('SOURCE', cols[4] + 2, y + 4);
+    y += 9;
+
+    // Table rows
+    doc.setFontSize(8);
+    markers.forEach(m => {
+      checkPage(8);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(15, 23, 42);
+      doc.text(m.name, cols[0] + 2, y);
+      doc.setFont('helvetica', 'normal');
+      doc.text(`${m.value} ${m.unit}`, cols[1] + 2, y);
+      doc.setTextColor(100, 116, 139);
+      doc.text(`${m.normal} ${m.unit}`, cols[2] + 2, y);
+
+      // Status with color
+      if (m.status === 'Normal') doc.setTextColor(22, 163, 74);
+      else if (m.status === 'Low') doc.setTextColor(217, 119, 6);
+      else if (m.status === 'High') doc.setTextColor(220, 38, 38);
+      else doc.setTextColor(100, 116, 139);
+      doc.setFont('helvetica', 'bold');
+      doc.text(m.status, cols[3] + 2, y);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(100, 116, 139);
+      doc.text(m.source || '', cols[4] + 2, y);
+
+      // Row separator
+      doc.setDrawColor(240, 244, 248);
+      doc.line(margin, y + 2, W - margin, y + 2);
+      y += 7;
+    });
+
+    y += 6;
+
+    // ── Section: Score Breakdown ─────────────────────────
+    checkPage(40);
+    doc.setDrawColor(221, 227, 236);
+    doc.line(margin, y, W - margin, y);
+    y += 8;
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.text('SCORE BREAKDOWN', margin, y);
+    y += 7;
+
+    Object.entries(penalties).forEach(([factor, pen]) => {
+      checkPage(8);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(100, 116, 139);
+      doc.text(factor, margin + 2, y);
+
+      // Mini bar
+      const barX = margin + 62;
+      const barW = 70;
+      const barH = 3;
+      doc.setFillColor(240, 244, 248);
+      doc.roundedRect(barX, y - 3, barW, barH, 1.5, 1.5, 'F');
+      if (pen > 0) {
+        const fillW = Math.min(barW, (pen / 30) * barW);
+        const c = pen <= 8 ? [217,119,6] : [220,38,38];
+        doc.setFillColor(...c);
+        doc.roundedRect(barX, y - 3, fillW, barH, 1.5, 1.5, 'F');
+      } else {
+        doc.setFillColor(22, 163, 74);
+        doc.roundedRect(barX, y - 3, barW, barH, 1.5, 1.5, 'F');
+      }
+
+      doc.setTextColor(pen === 0 ? 22 : 100, pen === 0 ? 163 : 116, pen === 0 ? 74 : 139);
+      doc.setFont('helvetica', 'bold');
+      doc.text(pen === 0 ? 'OK' : `-${Math.round(pen)}`, margin + contentW - 4, y, { align: 'right' });
+      y += 7;
+    });
+
+    y += 6;
+
+    // ── Section: Recommendations ─────────────────────────
+    checkPage(30);
+    doc.setDrawColor(221, 227, 236);
+    doc.line(margin, y, W - margin, y);
+    y += 8;
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.text('RECOMMENDATIONS', margin, y);
+    y += 7;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(15, 23, 42);
+    doc.setFontSize(8);
+    tips.forEach((tip, i) => {
+      checkPage(12);
+      const lines = doc.splitTextToSize(`${i + 1}. ${tip}`, contentW - 6);
+      doc.text(lines, margin + 2, y);
+      y += lines.length * 4.5 + 2;
+    });
+
+    y += 6;
+
+    // ── Footer / Disclaimer ─────────────────────────────
+    checkPage(20);
+    doc.setDrawColor(221, 227, 236);
+    doc.line(margin, y, W - margin, y);
+    y += 6;
+    doc.setFontSize(7);
+    doc.setTextColor(146, 64, 14);
+    doc.setFont('helvetica', 'bold');
+    doc.text('MEDICAL DISCLAIMER', margin, y);
+    y += 4;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.5);
+    const disclaimer = 'This tool is for informational purposes only and is not a substitute for professional medical advice, diagnosis, or treatment. Always consult a qualified nephrologist or physician.';
+    const dLines = doc.splitTextToSize(disclaimer, contentW);
+    doc.text(dLines, margin, y);
+
+    // ── Watermark on each page ──────────────────────────
+    const pages = doc.internal.getNumberOfPages();
+    for (let p = 1; p <= pages; p++) {
+      doc.setPage(p);
+      doc.setFontSize(7);
+      doc.setTextColor(180, 180, 180);
+      doc.text(`KidneyIQ Report  |  Page ${p}/${pages}`, W / 2, H - 8, { align: 'center' });
+    }
+
+    doc.save(`KidneyIQ_Report_${dateStr.replace(/ /g, '_')}.pdf`);
+  }
 </script>
 </body>
 </html>
