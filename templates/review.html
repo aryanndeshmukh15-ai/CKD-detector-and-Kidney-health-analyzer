@@ -4,24 +4,26 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>KidneyIQ — Review Extracted Values</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
   <style>
     .review-card {
       max-width: 780px;
       margin: 30px auto;
-      background: var(--card-bg, #fff);
+      background: var(--surface, #fff);
       border-radius: 16px;
       padding: 36px 40px;
-      box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+      box-shadow: 0 4px 24px rgba(5,150,105,.08), 0 1px 4px rgba(0,0,0,.04);
+      border: 1px solid var(--border, #d1e7dd);
     }
     .review-card h2 {
       margin: 0 0 6px;
       font-size: 1.5em;
-      color: var(--text-dark, #1e293b);
+      color: var(--text, #0f1f17);
+      font-weight: 700;
     }
     .review-card .sub {
-      color: var(--text-muted, #64748b);
+      color: var(--muted, #5a7265);
       margin: 0 0 28px;
       font-size: 0.95em;
     }
@@ -33,31 +35,32 @@
     .review-field label {
       display: block;
       font-weight: 600;
-      font-size: 0.88em;
-      color: var(--text-dark, #1e293b);
+      font-size: 0.85em;
+      color: var(--text, #0f1f17);
       margin-bottom: 5px;
     }
     .review-field label .unit {
       font-weight: 400;
-      color: var(--text-light, #94a3b8);
+      color: var(--muted, #5a7265);
     }
     .review-field input {
       width: 100%;
       padding: 10px 14px;
-      border: 1.5px solid #e2e8f0;
+      border: 1.5px solid var(--border, #d1e7dd);
       border-radius: 10px;
       font-size: 1em;
       font-family: inherit;
-      transition: border-color 0.2s;
-      background: #f8fafc;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      background: var(--surface2, #f0faf5);
     }
     .review-field input:focus {
       outline: none;
-      border-color: #0ea5e9;
+      border-color: #059669;
       background: #fff;
+      box-shadow: 0 0 0 3px rgba(5,150,105,.12);
     }
     .review-field input.ocr-filled {
-      border-color: #22c55e;
+      border-color: #16a34a;
       background: #f0fdf4;
     }
     .review-field .ocr-badge {
@@ -87,13 +90,13 @@
       flex: 1;
     }
     .review-actions .back-link {
-      color: var(--text-muted, #64748b);
+      color: var(--muted, #5a7265);
       text-decoration: none;
       font-size: 0.93em;
       font-weight: 500;
     }
     .review-actions .back-link:hover {
-      color: var(--text-dark, #1e293b);
+      color: var(--accent, #059669);
     }
     .pdf-warning {
       background: #fef3c7;
