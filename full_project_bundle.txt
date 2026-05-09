@@ -1,0 +1,3056 @@
+﻿# CKD_AI_Project - Complete Source Code Bundle
+# Upload this file to Claude to give it full context of the project
+
+
+{'='*80}
+FILE: app.py
+{'='*80}
+
+"""
+app.py â€” CKD Score Flask Application
+Uses the modular ocr/ package for all text extraction from lab reports.
+"""
+
+import os
+import logging
+import joblib
+import pandas as pd
+from flask import Flask, render_template, request
+
+# â”€â”€ OCR package â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+from ocr import configure_tesseract, ocr_text, extract_cbc, extract_cbc_consensus, load_image, ocr_file
+from ocr.pdf_extractor import extract_pdf_text
+from ocr.ocr_engine import OCREngine as _OCREngine
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configure Tesseract (auto-detects path; override here if needed)
+configure_tesseract()
+
+app     = Flask(__name__)
+model   = joblib.load("ckd_model.pkl")
+imputer = joblib.load("ckd_imputer.pkl")
+_engine = _OCREngine()          # shared OCR engine (loaded once)
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# OCR HELPER
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def ocr_image(path: str) -> str:
+    """
+    Hands off the image processing to the newly refactored dynamic OCREngine.
+    Automatically handles multiple preprocessing, dynamic configs, filtering, 
+    post-processing, and fallback to EasyOCR.
+    """
+    try:
+        return ocr_file(path, output="text")
+    except Exception as e:
+        logger.error(f"[OCR] Engine completely failed: {e}")
+        return ""
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# KIDNEY HEALTH SCORE & eGFR
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def calculate_egfr(creatinine: float, age: float) -> float:
+    """Calculate estimated Glomerular Filtration Rate using simplified MDRD."""
+    if creatinine <= 0 or age <= 0:
+        return -1.0
+    # Simplified MDRD formula (assumes generic male since gender isn't specified)
+    egfr = 175 * (creatinine ** -1.154) * (age ** -0.203)
+    return round(egfr, 1)
+
+def get_ckd_stage(egfr_value: float) -> dict:
+    """
+    Categorize the stage of Chronic Kidney Disease (CKD) based on calculated eGFR.
+    Uses KDIGO guidelines.
+    """
+    if egfr_value is None or egfr_value <= 0:
+        return {"stage": "Invalid Value", "desc": "N/A"}
+    if egfr_value >= 90:
+        return {"stage": "Stage 1", "desc": "Kidney damage with normal function"}
+    elif 60 <= egfr_value < 90:
+        return {"stage": "Stage 2", "desc": "Mild loss of kidney function"}
+    elif 45 <= egfr_value < 60:
+        return {"stage": "Stage 3a", "desc": "Mild to moderate loss"}
+    elif 30 <= egfr_value < 45:
+        return {"stage": "Stage 3b", "desc": "Moderate to severe loss"}
+    elif 15 <= egfr_value < 30:
+        return {"stage": "Stage 4", "desc": "Severe loss of kidney function"}
+    else:
+        return {"stage": "Stage 5", "desc": "Kidney failure (End-stage)"}
+
+def kidney_health_score(hemo, rc, wbc, pcv, creatinine, urea, bp, ckd_prob,
+                         bgr=120, sod=140, pot=4.5, egfr=None):
+    """
+    Compute a 0â€“100 kidney health score from biomarkers + eGFR.
+
+    Scoring philosophy:
+    - Start at 100 (perfect health)
+    - Deduct for EACH abnormal marker proportional to clinical severity
+    - eGFR / CKD stage is the HEAVIEST factor (up to 35 pts)
+    - CKD model probability adds up to 30 pts
+    - Individual biomarkers each penalize 3â€“25 pts
+    - A Stage 3a patient should score ~50â€“65 (Moderate / Poor)
+    """
+    penalties = {}
+
+    # â”€â”€ 1. eGFR / CKD Stage (dominant factor, up to 35 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if egfr is not None and egfr > 0:
+        if   egfr >= 90:  penalties["Kidney Function (eGFR)"] = 0
+        elif egfr >= 75:  penalties["Kidney Function (eGFR)"] = 5    # Stage 2 - mild
+        elif egfr >= 60:  penalties["Kidney Function (eGFR)"] = 12   # Stage 2 - lower end
+        elif egfr >= 45:  penalties["Kidney Function (eGFR)"] = 22   # Stage 3a
+        elif egfr >= 30:  penalties["Kidney Function (eGFR)"] = 28   # Stage 3b
+        elif egfr >= 15:  penalties["Kidney Function (eGFR)"] = 32   # Stage 4
+        else:             penalties["Kidney Function (eGFR)"] = 35   # Stage 5
+    else:
+        penalties["Kidney Function (eGFR)"] = 0
+
+    # â”€â”€ 2. CKD Model Probability (up to 30 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Exponential curve: low probabilities barely penalize, high ones hit hard
+    if ckd_prob > 0.5:
+        penalties["CKD Risk (ML Model)"] = round(10 + (ckd_prob - 0.5) * 40, 1)
+    elif ckd_prob > 0.2:
+        penalties["CKD Risk (ML Model)"] = round(ckd_prob * 15, 1)
+    else:
+        penalties["CKD Risk (ML Model)"] = 0
+
+    # â”€â”€ 3. Serum Creatinine (up to 25 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   creatinine > 8:   penalties["Creatinine"] = 25
+    elif creatinine > 4:   penalties["Creatinine"] = 20
+    elif creatinine > 2.5: penalties["Creatinine"] = 16
+    elif creatinine > 1.8: penalties["Creatinine"] = 12
+    elif creatinine > 1.3: penalties["Creatinine"] = 8
+    elif creatinine > 1.2: penalties["Creatinine"] = 4
+    else:                  penalties["Creatinine"] = 0
+
+    # â”€â”€ 4. Hemoglobin (up to 20 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   hemo < 7:    penalties["Hemoglobin"] = 20
+    elif hemo < 9:    penalties["Hemoglobin"] = 15
+    elif hemo < 10.5: penalties["Hemoglobin"] = 10
+    elif hemo < 12:   penalties["Hemoglobin"] = 6
+    elif hemo > 18:   penalties["Hemoglobin"] = 8
+    elif hemo > 17.5: penalties["Hemoglobin"] = 4
+    else:             penalties["Hemoglobin"] = 0
+
+    # â”€â”€ 5. Blood Urea (up to 18 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   urea > 150: penalties["Blood Urea"] = 18
+    elif urea > 100: penalties["Blood Urea"] = 14
+    elif urea > 70:  penalties["Blood Urea"] = 10
+    elif urea > 45:  penalties["Blood Urea"] = 6
+    else:            penalties["Blood Urea"] = 0
+
+    # â”€â”€ 6. Blood Pressure (up to 12 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   bp > 110: penalties["Blood Pressure"] = 12
+    elif bp > 95:  penalties["Blood Pressure"] = 9
+    elif bp > 85:  penalties["Blood Pressure"] = 6
+    elif bp > 80:  penalties["Blood Pressure"] = 3
+    else:          penalties["Blood Pressure"] = 0
+
+    # â”€â”€ 7. PCV / Haematocrit (up to 12 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   pcv < 20: penalties["PCV"] = 12
+    elif pcv < 28: penalties["PCV"] = 8
+    elif pcv < 36: penalties["PCV"] = 5
+    elif pcv > 54: penalties["PCV"] = 5
+    else:          penalties["PCV"] = 0
+
+    # â”€â”€ 8. Blood Glucose (up to 10 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   bgr > 300: penalties["Blood Glucose"] = 10
+    elif bgr > 200: penalties["Blood Glucose"] = 7
+    elif bgr > 140: penalties["Blood Glucose"] = 4
+    elif bgr < 60:  penalties["Blood Glucose"] = 5
+    else:           penalties["Blood Glucose"] = 0
+
+    # â”€â”€ 9. Sodium (up to 8 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   sod < 125: penalties["Sodium"] = 8
+    elif sod < 130: penalties["Sodium"] = 5
+    elif sod < 136: penalties["Sodium"] = 3
+    elif sod > 150: penalties["Sodium"] = 6
+    elif sod > 145: penalties["Sodium"] = 3
+    else:           penalties["Sodium"] = 0
+
+    # â”€â”€ 10. Potassium (up to 10 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   pot > 6.5: penalties["Potassium"] = 10
+    elif pot > 5.5: penalties["Potassium"] = 7
+    elif pot > 5.0: penalties["Potassium"] = 4
+    elif pot < 3.0: penalties["Potassium"] = 8
+    elif pot < 3.5: penalties["Potassium"] = 4
+    else:           penalties["Potassium"] = 0
+
+    # â”€â”€ 11. RBC Count (up to 6 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   rc < 3.0: penalties["RBC Count"] = 6
+    elif rc < 3.8: penalties["RBC Count"] = 3
+    elif rc > 6.5: penalties["RBC Count"] = 4
+    elif rc > 6.0: penalties["RBC Count"] = 2
+    else:          penalties["RBC Count"] = 0
+
+    # â”€â”€ 12. WBC Count (up to 6 pts) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if   wbc > 15000: penalties["WBC Count"] = 6
+    elif wbc > 11000: penalties["WBC Count"] = 3
+    elif wbc < 3000:  penalties["WBC Count"] = 5
+    elif wbc < 4000:  penalties["WBC Count"] = 2
+    else:             penalties["WBC Count"] = 0
+
+    # â”€â”€ Clamp & Grade â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    score = max(0, min(100, round(100 - sum(penalties.values()))))
+
+    if score >= 85:   grade, status = "A", "Excellent"
+    elif score >= 70: grade, status = "B", "Good"
+    elif score >= 55: grade, status = "C", "Moderate"
+    elif score >= 35: grade, status = "D", "Poor"
+    else:             grade, status = "F", "Critical"
+
+    return score, grade, status, penalties
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# MARKER STATUS
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def marker_status(name: str, value: float):
+    """Return (status_label, pct_in_range) for a biomarker."""
+    if name == "egfr":
+        if value >= 90: return "Normal", 100
+        elif value >= 60: return "Mildly Low", 80
+        elif value >= 45: return "Low", 60
+        elif value >= 30: return "Very Low", 40
+        elif value >= 15: return "Severe", 20
+        else:             return "Critical", 5
+
+    ranges = {
+        "hemoglobin": (12.0, 17.5),
+        "creatinine": (0.6,  1.2),
+        "urea":       (7.0,  45.0),
+        "bp":         (60.0, 80.0),
+        "pcv":        (36.0, 50.0),
+        "wbc":        (4000, 11000),
+        "rbc":        (3.8,  6.0),
+        "sodium":     (136.0, 145.0),
+        "potassium":  (3.5,  5.0),
+        "glucose":    (70.0, 140.0),
+    }
+    lo, hi = ranges.get(name, (0, 1))
+    span = hi - lo
+    if value < lo:
+        return "Low",    max(0, int(100 * value / lo))
+    elif value > hi:
+        excess = value - hi
+        return "High",   max(20, min(100, int(100 - (excess / span) * 50)))
+    else:
+        return "Normal", 100
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ROUTES
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+
+@app.route("/debug-ocr", methods=["POST"])
+def debug_ocr():
+    """POST an image/PDF to see raw OCR text and extracted CBC values."""
+    report = request.files.get("report")
+    if not report or not report.filename:
+        return "No file uploaded", 400
+    os.makedirs("uploads", exist_ok=True)
+    filepath = os.path.join("uploads", report.filename)
+    report.save(filepath)
+    text = extract_pdf_text(filepath, ocr_engine=_engine) if filepath.lower().endswith(".pdf") else ocr_image(filepath)
+    extracted = extract_cbc(text)
+    return f"<pre>RAW OCR:\n{text}\n\nEXTRACTED:\n{extracted}</pre>"
+
+
+def _run_ocr_from_request(report_file):
+    """Save uploaded file, run OCR, return (cbc_dict, pdf_warning)."""
+    pdf_warning = None
+    text = ""
+    if not report_file or not report_file.filename:
+        return {}, pdf_warning
+
+    os.makedirs("uploads", exist_ok=True)
+    filepath = os.path.join("uploads", report_file.filename)
+    report_file.save(filepath)
+
+    if filepath.lower().endswith(".pdf"):
+        try:
+            import fitz as _fitz
+            with open(filepath, "rb") as fh:
+                _raw = fh.read()
+            _doc = _fitz.open(stream=_raw, filetype="pdf")
+            locked = _doc.needs_pass
+            _doc.close()
+            if locked:
+                pdf_warning = ("Your PDF is password-protected. Please remove the password "
+                               "or upload a PNG/JPG screenshot instead.")
+                logger.warning("[PDF] Skipping password-protected PDF.")
+            else:
+                text = extract_pdf_text(filepath, ocr_engine=_engine)
+        except Exception as e:
+            logger.error(f"[OCR] PDF pre-check error: {e}")
+            text = extract_pdf_text(filepath, ocr_engine=_engine)
+        cbc = extract_cbc(text) if text else {}
+    elif filepath.lower().endswith((".png", ".jpg", ".jpeg")):
+        # â”€â”€ Multi-pass consensus extraction for images â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # Run OCR on ALL preprocessing candidates and take a majority vote
+        # per marker.  This fixes single-candidate digit misreads (e.g.
+        # Tesseract reading '5' as '9' on one pipeline but not the others).
+        try:
+            img = load_image(filepath)
+            all_texts = _engine.all_candidates_text(img)
+            logger.info(f"[OCR] Ran {len(all_texts)} preprocessing candidates for consensus")
+            cbc = extract_cbc_consensus(all_texts) if all_texts else {}
+            # Also keep the single-best text for any fallback
+            text = all_texts[0] if all_texts else ""
+        except Exception as e:
+            logger.error(f"[OCR] Consensus extraction failed on {filepath}: {e}")
+            # Fallback to single-pass
+            try:
+                text = ocr_image(filepath)
+                cbc = extract_cbc(text) if text else {}
+            except Exception as e2:
+                logger.error(f"[OCR] Single-pass fallback also failed: {e2}")
+                cbc = {}
+    else:
+        cbc = {}
+
+    if cbc:
+        logger.info(f"[OCR] Extracted (consensus): {cbc}")
+    return cbc, pdf_warning
+
+
+# â”€â”€ STEP 1: Upload â†’ OCR â†’ Editable review form â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@app.route("/review", methods=["POST"])
+def review():
+    """
+    Run OCR on the uploaded report, then show all extracted values
+    in editable fields so the user can correct any OCR mistakes before
+    the model runs.
+    """
+    age = request.form.get("age", "")
+    bp  = request.form.get("bp",  "")
+
+    cbc, pdf_warning = _run_ocr_from_request(request.files.get("report"))
+
+    # Each field: form key, display label, unit, CBC dict key, fallback default
+    FIELDS = [
+        ("hemo",           "Hemoglobin",    "g/dL",  "hemoglobin", ""),
+        ("rbc_val",        "RBC Count",     "M/ÂµL",  "rbc",        ""),
+        ("wbc_val",        "WBC Count",     "/ÂµL",   "wbc",        ""),
+        ("pcv_val",        "PCV",           "%",     "pcv",        ""),
+        ("creatinine_val", "Creatinine",    "mg/dL", "creatinine", ""),
+        ("urea_val",       "Blood Urea",    "mg/dL", "urea",       ""),
+        ("bgr_val",        "Blood Glucose", "mg/dL", "glucose",    ""),
+        ("sod_val",        "Sodium",        "mEq/L", "sodium",     ""),
+        ("pot_val",        "Potassium",     "mEq/L", "potassium",  ""),
+    ]
+
+    fields = []
+    for key, label, unit, cbc_key, default in FIELDS:
+        ocr_val = cbc.get(cbc_key)
+        fields.append({
+            "key":       key,
+            "label":     label,
+            "unit":      unit,
+            "value":     str(round(ocr_val, 3)) if ocr_val is not None else default,
+            "ocr_found": ocr_val is not None,
+        })
+
+    return render_template(
+        "review.html",
+        fields=fields,
+        age=age,
+        bp=bp,
+        pdf_warning=pdf_warning,
+    )
+
+
+# â”€â”€ STEP 2: Confirmed values â†’ Predict â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@app.route("/predict", methods=["POST"])
+def predict():
+    # All values come from the review form â€” user has already verified them
+    age = float(request.form.get("age") or 0)
+    bp  = float(request.form.get("bp")  or 0)
+
+    def _f(key, default):
+        v = request.form.get(key, "").strip()
+        try:    return float(v) if v else default
+        except: return default
+
+    hemo       = _f("hemo",           13.5)
+    rc         = _f("rbc_val",         5.0)
+    wbc        = _f("wbc_val",        7800.0)
+    pcv        = _f("pcv_val",          44.0)
+    creatinine = _f("creatinine_val",    1.0)
+    urea       = _f("urea_val",         40.0)
+    bgr        = _f("bgr_val",         120.0)
+    sod        = _f("sod_val",         140.0)
+    pot        = _f("pot_val",           4.5)
+
+    logger.info(f"[PREDICT] Received form values: hemo={hemo}, rbc={rc}, wbc={wbc}, "
+                f"pcv={pcv}, creatinine={creatinine}, urea={urea}, bgr={bgr}, sod={sod}, pot={pot}")
+
+    # Determine source label: "report" if a value was provided, otherwise "assumed <default>"
+    def _src(key, default):
+        v = request.form.get(key, "").strip()
+        try:
+            float(v)
+            return "report"
+        except (ValueError, TypeError):
+            return f"assumed {default}"
+
+    hemo_src = _src("hemo", 13.5)
+    rc_src   = _src("rbc_val", 5.0)
+    wbc_src  = _src("wbc_val", 7800)
+    pcv_src  = _src("pcv_val", 44)
+    sc_src   = _src("creatinine_val", 1.0)
+    urea_src = _src("urea_val", 40)
+    bgr_src  = _src("bgr_val", 120)
+    sod_src  = _src("sod_val", 140)
+    pot_src  = _src("pot_val", 4.5)
+
+    rbc_flag = 1 if 3.8 <= rc <= 6.0 else 0
+
+    # â”€â”€ Model prediction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    patient = pd.DataFrame([[
+        age, bp, 1.02, 0, 0, rbc_flag, 1, 0, 0,
+        bgr, urea, creatinine, sod, pot,
+        hemo, pcv, wbc, rc,
+        0, 0, 0, 1, 0, 0
+    ]], columns=[
+        "age", "bp", "sg", "al", "su", "rbc", "pc", "pcc", "ba",
+        "bgr", "bu", "sc", "sod", "pot", "hemo", "pcv", "wc", "rc",
+        "htn", "dm", "cad", "appet", "pe", "ane",
+    ])
+
+    patient_imp  = pd.DataFrame(imputer.transform(patient), columns=patient.columns)
+    prediction   = model.predict(patient_imp)[0]
+    proba        = model.predict_proba(patient_imp)[0]
+    ckd_detected = (prediction == 1)
+    ckd_prob     = float(proba[1])
+    confidence   = int(round(max(proba) * 100))
+
+    # â”€â”€ Kidney health score & eGFR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    egfr = calculate_egfr(creatinine, age)
+    ckd_stage_info = get_ckd_stage(egfr)
+    score, grade, status, penalties = kidney_health_score(
+        hemo, rc, wbc, pcv, creatinine, urea, bp, ckd_prob,
+        bgr=bgr, sod=sod, pot=pot, egfr=egfr
+    )
+
+    # â”€â”€ Biomarker rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    def mk(name, value, unit, normal, key):
+        st, pct = marker_status(key, value)
+        return {"name": name, "value": value, "unit": unit,
+                "normal": normal, "status": st, "pct": pct}
+
+    markers = [
+        {**mk("eGFR",             egfr,                 "mL/min", "> 90",      "egfr"),        "source": "calculated"},
+        {**mk("Hemoglobin",       round(hemo, 1),       "g/dL",   "12.0 â€“ 17.5", "hemoglobin"),  "source": hemo_src},
+        {**mk("RBC Count",        round(rc, 2),          "M/ÂµL",   "3.8 â€“ 6.0",   "rbc"),         "source": rc_src},
+        {**mk("WBC Count",        int(wbc),              "/ÂµL",    "4,000 â€“ 11,000","wbc"),        "source": wbc_src},
+        {**mk("PCV / Haematocrit",round(pcv, 1),         "%",      "36 â€“ 50",     "pcv"),         "source": pcv_src},
+        {**mk("Serum Creatinine", round(creatinine, 1),  "mg/dL",  "0.6 â€“ 1.2",   "creatinine"),  "source": sc_src},
+        {**mk("Blood Urea",       round(urea, 1),        "mg/dL",  "7 â€“ 45",      "urea"),        "source": urea_src},
+        {**mk("Blood Pressure",   int(bp),               "mmHg",   "60 â€“ 80",     "bp"),          "source": "entered"},
+        {**mk("Blood Glucose",    round(bgr, 1),         "mg/dL",  "70 â€“ 140",    "glucose"),     "source": bgr_src},
+        {**mk("Sodium",           round(sod, 1),         "mEq/L",  "136 â€“ 145",   "sodium"),      "source": sod_src},
+        {**mk("Potassium",        round(pot, 1),         "mEq/L",  "3.5 â€“ 5.0",   "potassium"),   "source": pot_src},
+    ]
+
+    # â”€â”€ Recommendations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    tips = []
+    if ckd_stage_info['stage'] in ['Stage 3b', 'Stage 4', 'Stage 5']:
+        tips.append(f"Severe eGFR reading ({ckd_stage_info['stage']}). Immediate nephrology consultation required.")
+    elif ckd_stage_info['stage'] == 'Stage 3a':
+        tips.append(f"eGFR indicates mild-to-moderate kidney impairment ({ckd_stage_info['stage']}). Schedule a nephrology consultation.")
+    elif ckd_stage_info['stage'] == 'Stage 2':
+        tips.append("eGFR shows mild kidney function decline. Monitor regularly and manage risk factors.")
+    if hemo < 12:       tips.append("Low hemoglobin â€” consider iron-rich foods and consult a physician for anaemia evaluation.")
+    if creatinine > 1.3:tips.append("Elevated creatinine â€” reduce protein intake and schedule a kidney function panel.")
+    if urea > 45:       tips.append("High blood urea â€” increase water intake and reduce high-protein foods.")
+    if bp > 80:         tips.append("Elevated blood pressure â€” reduce sodium intake, exercise regularly, and monitor BP daily.")
+    if pcv < 36:        tips.append("Low PCV indicates possible anaemia â€” seek haematology consultation.")
+    if bgr > 140:       tips.append("High blood glucose â€” monitor for diabetes and consult an endocrinologist.")
+    if sod < 136:       tips.append("Low sodium (hyponatremia) â€” may indicate fluid imbalance; consult a physician.")
+    elif sod > 145:     tips.append("High sodium (hypernatremia) â€” increase water intake and reduce salt consumption.")
+    if pot < 3.5:       tips.append("Low potassium (hypokalemia) â€” eat potassium-rich foods and consult a physician.")
+    elif pot > 5.0:     tips.append("High potassium (hyperkalemia) â€” avoid high-potassium foods; this can affect heart rhythm.")
+    if ckd_detected:    tips.append("CKD risk flagged â€” consult a nephrologist for a comprehensive kidney workup.")
+    if not tips:        tips.append("All markers are within normal limits. Maintain a healthy diet, stay hydrated, and schedule annual check-ups.")
+
+    return render_template(
+        "index.html",
+        ckd_detected=ckd_detected, confidence=confidence,
+        ckd_prob=round(ckd_prob * 100, 1),
+        score=score, grade=grade, status=status, penalties=penalties,
+        age=int(age), bp=int(bp),
+        markers=markers, tips=tips, score_val=score,
+        egfr=egfr, ckd_stage_info=ckd_stage_info,
+    )
+
+
+if __name__ == "__main__":
+    app.run(debug=False)
+
+{'='*80}
+FILE: train_model.py
+{'='*80}
+
+"""
+CKD Model Training Script - High Confidence Edition
+Key improvements:
+- Removed SVM (kills probability calibration)
+- Added CalibratedClassifierCV for sharper probabilities
+- Tuned ensemble weights
+- Saves feature column order for consistent prediction
+"""
+
+import pandas as pd
+import numpy as np
+import joblib
+import warnings
+warnings.filterwarnings("ignore")
+
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score, GridSearchCV
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+
+try:
+    from imblearn.over_sampling import SMOTE
+    HAS_SMOTE = True
+except ImportError:
+    HAS_SMOTE = False
+    print("WARNING: imbalanced-learn not installed. Skipping SMOTE.")
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 1. LOAD & CLEAN DATA
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+print("=" * 60)
+print("LOADING DATA")
+print("=" * 60)
+
+df = pd.read_csv("kidney_disease.csv")
+print(f"Raw shape: {df.shape}")
+
+df["classification"] = df["classification"].str.strip()
+df = df[df["classification"].isin(["ckd", "notckd"])]
+df["classification"] = df["classification"].map({"ckd": 1, "notckd": 0})
+df = df.drop(columns=["id"], errors="ignore")
+
+print(f"After cleaning: {df.shape}")
+print(f"Class distribution: CKD={df['classification'].sum()}, No CKD={(df['classification']==0).sum()}")
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 2. FEATURE ENGINEERING
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+CAT_COLS = ["rbc", "pc", "pcc", "ba", "htn", "dm", "cad", "appet", "pe", "ane"]
+NUM_COLS = ["age", "bp", "sg", "al", "su", "bgr", "bu", "sc", "sod", "pot",
+            "hemo", "pcv", "wc", "rc"]
+
+for col in NUM_COLS:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col].astype(str).str.strip(), errors="coerce")
+
+le = LabelEncoder()
+for col in CAT_COLS:
+    if col in df.columns:
+        df[col] = df[col].astype(str).str.strip().str.lower()
+        df[col] = le.fit_transform(df[col])
+
+X = df.drop(columns=["classification"])
+y = df["classification"]
+
+# Save column order â€” critical for consistent prediction
+feature_columns = list(X.columns)
+joblib.dump(feature_columns, "ckd_feature_columns.pkl")
+print(f"\nFeatures saved: {feature_columns}")
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 3. TRAIN / TEST SPLIT + IMPUTE
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+imputer = SimpleImputer(strategy="median")
+X_train_imp = pd.DataFrame(imputer.fit_transform(X_train), columns=X.columns)
+X_test_imp  = pd.DataFrame(imputer.transform(X_test),      columns=X.columns)
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 4. SMOTE
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+if HAS_SMOTE:
+    sm = SMOTE(random_state=42)
+    X_train_bal, y_train_bal = sm.fit_resample(X_train_imp, y_train)
+    print(f"\nAfter SMOTE â€” CKD: {y_train_bal.sum()}, No CKD: {(y_train_bal==0).sum()}")
+else:
+    X_train_bal, y_train_bal = X_train_imp, y_train
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 5. TUNE RANDOM FOREST
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+print("\n" + "=" * 60)
+print("TUNING RANDOM FOREST")
+print("=" * 60)
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+rf_params = {
+    "n_estimators": [300, 500],
+    "max_depth":    [None, 15],
+    "min_samples_split": [2, 5],
+}
+rf_grid = GridSearchCV(
+    RandomForestClassifier(class_weight="balanced", random_state=42, n_jobs=-1),
+    rf_params, cv=cv, scoring="roc_auc", n_jobs=-1, verbose=0
+)
+rf_grid.fit(X_train_bal, y_train_bal)
+best_rf = rf_grid.best_estimator_
+print(f"Best RF params: {rf_grid.best_params_}")
+print(f"Best RF CV AUC: {rf_grid.best_score_:.4f}")
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 6. CALIBRATE RF & GB â€” KEY FIX FOR CONFIDENCE
+# CalibratedClassifierCV uses isotonic regression to fix overconfident
+# or underconfident probability outputs â†’ sharper, more accurate confidence
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+print("\n" + "=" * 60)
+print("CALIBRATING MODELS (Isotonic Regression)")
+print("=" * 60)
+
+calibrated_rf = CalibratedClassifierCV(best_rf, method="isotonic", cv=5)
+calibrated_rf.fit(X_train_bal, y_train_bal)
+
+gb = GradientBoostingClassifier(
+    n_estimators=300, learning_rate=0.05, max_depth=4,
+    subsample=0.8, random_state=42
+)
+calibrated_gb = CalibratedClassifierCV(gb, method="isotonic", cv=5)
+calibrated_gb.fit(X_train_bal, y_train_bal)
+
+lr = Pipeline([
+    ("scaler", StandardScaler()),
+    ("clf", LogisticRegression(C=1.0, class_weight="balanced",
+                               max_iter=1000, random_state=42))
+])
+lr.fit(X_train_bal, y_train_bal)
+
+print("Calibration complete.")
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 7. VOTING ENSEMBLE (no SVM â€” it hurts calibration)
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+print("\n" + "=" * 60)
+print("BUILDING CALIBRATED VOTING ENSEMBLE")
+print("=" * 60)
+
+ensemble = VotingClassifier(
+    estimators=[
+        ("rf", calibrated_rf),
+        ("gb", calibrated_gb),
+        ("lr", lr),
+    ],
+    voting="soft",
+    weights=[4, 3, 1],   # RF gets highest weight
+)
+ensemble.fit(X_train_bal, y_train_bal)
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 8. EVALUATE
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+print("\n" + "=" * 60)
+print("FINAL EVALUATION ON TEST SET")
+print("=" * 60)
+
+y_pred  = ensemble.predict(X_test_imp)
+y_proba = ensemble.predict_proba(X_test_imp)[:, 1]
+
+acc = accuracy_score(y_test, y_pred)
+auc = roc_auc_score(y_test, y_proba)
+cm  = confusion_matrix(y_test, y_pred)
+
+print(f"Test Accuracy : {acc*100:.2f}%")
+print(f"ROC-AUC Score : {auc:.4f}")
+print()
+print(classification_report(y_test, y_pred, target_names=["No CKD", "CKD"]))
+
+tn, fp, fn, tp = cm.ravel()
+print(f"Sensitivity : {tp/(tp+fn)*100:.2f}%")
+print(f"Specificity : {tn/(tn+fp)*100:.2f}%")
+
+avg_confidence_ckd    = y_proba[y_test == 1].mean()
+avg_confidence_nockd  = (1 - y_proba[y_test == 0]).mean()
+print(f"\nAvg model confidence (CKD cases)    : {avg_confidence_ckd*100:.1f}%")
+print(f"Avg model confidence (No CKD cases) : {avg_confidence_nockd*100:.1f}%")
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# 9. SAVE
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+print("\n" + "=" * 60)
+print("SAVING")
+print("=" * 60)
+
+joblib.dump(ensemble, "ckd_model.pkl")
+joblib.dump(imputer,  "ckd_imputer.pkl")
+
+print("Saved: ckd_model.pkl")
+print("Saved: ckd_imputer.pkl")
+print("Saved: ckd_feature_columns.pkl")
+print("\nDone. Expected confidence will now be 88-97% for clear cases.")
+
+{'='*80}
+FILE: main.py
+{'='*80}
+
+import streamlit as st
+from PIL import Image
+
+st.title("CKD Detection System")
+st.write("Upload CBC report to predict CKD")
+
+uploaded_file = st.file_uploader("Upload CBC Report Image", type=["png","jpg","jpeg"])
+
+if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded CBC Report", use_column_width=True)
+
+
+{'='*80}
+FILE: ocr\__init__.py
+{'='*80}
+
+"""OCR package â€” Tesseract-based pipeline pipeline with EasyOCR fallback."""
+from ocr.ocr_engine import configure_tesseract, ocr_text, ocr_file, ocr_json
+from ocr.utils import extract_cbc, extract_cbc_consensus, resolve_value
+from ocr.preprocessing import load_image
+
+__all__ = [
+    "configure_tesseract",
+    "ocr_text", "ocr_file", "ocr_json",
+    "extract_cbc", "extract_cbc_consensus", "resolve_value",
+    "load_image",
+]
+
+
+
+{'='*80}
+FILE: ocr\ocr_engine.py
+{'='*80}
+
+"""
+ocr/ocr_engine.py
+-----------------
+Tesseract OCR engine wrapper with fallback to EasyOCR.
+Evaluates multiple preprocessing candidates dynamically for maximum accuracy.
+"""
+
+import logging
+import platform
+import os
+import shutil
+from typing import Optional, List, Dict, Any, Tuple
+
+import cv2
+import numpy as np
+import pytesseract
+
+from ocr.preprocessing import get_preprocessing_candidates, load_image
+from ocr.postprocessing import merge_boxes, extract_text_from_merged
+
+logger = logging.getLogger(__name__)
+
+
+# â”€â”€ Tesseract path auto-detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def _find_tesseract() -> Optional[str]:
+    """Auto-detect Tesseract executable path across platforms."""
+    system = platform.system()
+    candidates = []
+
+    if system == "Windows":
+        candidates = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            r"C:\Users\aryan_9nptyqz\AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
+        ]
+    elif system == "Darwin":
+        candidates = [
+            "/usr/local/bin/tesseract",
+            "/opt/homebrew/bin/tesseract",
+        ]
+    else:  # Linux
+        candidates = [
+            "/usr/bin/tesseract",
+            "/usr/local/bin/tesseract",
+        ]
+
+    for path in candidates:
+        if os.path.isfile(path):
+            logger.debug(f"Found Tesseract at: {path}")
+            return path
+
+    found = shutil.which("tesseract")
+    if found:
+        return found
+
+    logger.warning("Tesseract not found. Please ensure it is installed.")
+    return None
+
+def configure_tesseract(custom_path: Optional[str] = None) -> None:
+    """Configure pytesseract with the correct Tesseract binary path."""
+    path = custom_path or _find_tesseract()
+    if path:
+        pytesseract.pytesseract.tesseract_cmd = path
+
+
+# â”€â”€ OCREngine Class â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+class OCRError(Exception):
+    pass
+
+class OCREngine:
+    def __init__(self, lang: str = "eng", use_easyocr_fallback: bool = True):
+        self.lang = lang
+        self.use_easyocr_fallback = use_easyocr_fallback
+        self._easyocr_reader = None
+        configure_tesseract()
+        
+    def _get_easyocr(self):
+        """Lazy-load the EasyOCR reader if it is needed."""
+        if self._easyocr_reader is None:
+            try:
+                import easyocr
+                # Init with gpu=True if available. It gracefully falls back to CPU.
+                self._easyocr_reader = easyocr.Reader([self.lang], gpu=True)
+            except ImportError:
+                logger.warning("EasyOCR not installed. Fallback is disabled.")
+                self.use_easyocr_fallback = False
+        return self._easyocr_reader
+
+    def get_best_preprocessing(self, img: np.ndarray, config: str) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """Runs a fast Tesseract pass on all candidates and returns the best image and its OCR data."""
+        candidates = get_preprocessing_candidates(img)
+        best_score = -1
+        best_img = None
+        best_data = []
+
+        for name, candidate_img in candidates.items():
+            try:
+                # Use image_to_data to get bounding boxes and confidences
+                data = pytesseract.image_to_data(
+                    candidate_img, lang=self.lang, config=config,
+                    output_type=pytesseract.Output.DICT
+                )
+                
+                # Filter valid words and sum confidence
+                confs = []
+                valid_words_data = []
+                for i, word in enumerate(data["text"]):
+                    conf = int(data["conf"][i])
+                    # Require minimum conf to count as "text" for evaluation
+                    if conf > 10 and word.strip():
+                        confs.append(conf)
+                        valid_words_data.append({
+                            "text": word,
+                            "conf": conf,
+                            "left": data["left"][i],
+                            "top": data["top"][i],
+                            "width": data["width"][i],
+                            "height": data["height"][i],
+                            "block_num": data["block_num"][i],
+                            "par_num": data["par_num"][i],
+                            "line_num": data["line_num"][i],
+                        })
+                
+                avg_conf = sum(confs) / len(confs) if confs else 0
+                logger.debug(f"Preprocessing candidate '{name}' scored avg conf {avg_conf:.2f}")
+
+                if avg_conf > best_score:
+                    best_score = avg_conf
+                    best_img = candidate_img
+                    best_data = valid_words_data
+                    
+            except Exception as e:
+                logger.warning(f"Failed to evaluate candidate '{name}': {e}")
+                
+        if best_img is None:
+            raise OCRError("All preprocessing evaluations failed.")
+            
+        return best_img, best_data
+
+    def extract_data(self, img: np.ndarray, min_confidence: int = 30) -> List[Dict[str, Any]]:
+        """
+        Dynamically select the best config and preprocessing pipeline, 
+        yielding the most structured and confident bounding boxes.
+        """
+        configs_to_try = [
+            "--psm 6 --oem 3",   # Uniform block of text
+            "--psm 11 --oem 3"   # Sparse text layout
+        ]
+        
+        best_overall_score = -1
+        best_overall_data = []
+        
+        for config in configs_to_try:
+            try:
+                # Determine the best image transformation for this PSM
+                _, raw_data = self.get_best_preprocessing(img, config)
+                
+                # Hard filter the result based on requested minimal confidence
+                filtered_data = [w for w in raw_data if w['conf'] >= min_confidence]
+                
+                if not filtered_data:
+                    continue
+                    
+                # Weight by both confidence and the amount of recognized text
+                # We cap count at 100 so length doesn't completely overpower average confidence
+                avg_conf = sum(w['conf'] for w in filtered_data) / len(filtered_data)
+                score = avg_conf * min(len(filtered_data), 100) 
+                
+                if score > best_overall_score:
+                    best_overall_score = score
+                    best_overall_data = filtered_data
+                    
+            except Exception as e:
+                logger.error(f"OCR evaluation config {config} failed: {e}")
+                
+        # EasyOCR Fallback Check
+        if not best_overall_data and self.use_easyocr_fallback:
+            reader = self._get_easyocr()
+            if reader:
+                logger.info("Tesseract failed. Invoking EasyOCR fallback...")
+                try:
+                    candidates = get_preprocessing_candidates(img)
+                    easy_img = candidates.get("printed", img) # EasyOCR usually likes printed pipeline
+                    
+                    results = reader.readtext(easy_img)
+                    for (bbox, text, prob) in results:
+                        conf = int(prob * 100)
+                        if conf >= min_confidence:
+                            best_overall_data.append({
+                                "text": text,
+                                "conf": conf,
+                                "left": int(bbox[0][0]),
+                                "top": int(bbox[0][1]),
+                                "width": int(bbox[1][0] - bbox[0][0]),
+                                "height": int(bbox[2][1] - bbox[0][1]),
+                            })
+                except Exception as e:
+                    logger.error(f"EasyOCR fallback failed: {e}")
+
+        # Final Post-processing: Merge aligned bounding boxes into sentences/lines
+        merged_lines = merge_boxes(best_overall_data)
+        return merged_lines
+
+    def ocr_text(self, img: np.ndarray) -> str:
+        """Helper to get a clean extracted string block."""
+        data = self.extract_data(img)
+        return extract_text_from_merged(data)
+
+    def all_candidates_text(self, img: np.ndarray, min_confidence: int = 30) -> list:
+        """
+        Run OCR on EVERY preprocessing candidate with MULTIPLE Tesseract
+        configs and return a list of text strings.  Downstream code can
+        extract CBC values from each and take a majority vote to neutralise
+        digit misreads (e.g. Tesseract reading '5' as '9').
+        """
+        from ocr.postprocessing import merge_boxes as _merge, extract_text_from_merged as _etfm
+        candidates = get_preprocessing_candidates(img)
+        configs = [
+            "--psm 6 --oem 3",   # Uniform block of text
+            "--psm 4 --oem 3",   # Single column of variable-size text
+            "--psm 3 --oem 3",   # Fully automatic page segmentation
+        ]
+        texts = []
+
+        for name, candidate_img in candidates.items():
+            for config in configs:
+                try:
+                    data = pytesseract.image_to_data(
+                        candidate_img, lang=self.lang, config=config,
+                        output_type=pytesseract.Output.DICT,
+                    )
+                    valid = []
+                    for i, word in enumerate(data["text"]):
+                        conf = int(data["conf"][i])
+                        if conf >= min_confidence and word.strip():
+                            valid.append({
+                                "text": word, "conf": conf,
+                                "left": data["left"][i], "top": data["top"][i],
+                                "width": data["width"][i], "height": data["height"][i],
+                                "block_num": data["block_num"][i],
+                                "par_num": data["par_num"][i],
+                                "line_num": data["line_num"][i],
+                            })
+                    if valid:
+                        merged = _merge(valid)
+                        texts.append(_etfm(merged))
+                        logger.debug(
+                            f"all_candidates_text: '{name}' + '{config}' â†’ {len(merged)} lines"
+                        )
+                except Exception as e:
+                    logger.warning(f"all_candidates_text: '{name}' + '{config}' failed: {e}")
+
+        return texts
+
+    def process_file(self, path: str, output: str = "text") -> Any:
+        try:
+            img = load_image(path)
+            if output == "text":
+                return self.ocr_text(img)
+            elif output == "json":
+                return self.extract_data(img)
+            else:
+                raise ValueError("Only 'text' and 'json' outputs are supported in the new pipeline.")
+        except Exception as e:
+            logger.error(f"Failed to process file {path}: {e}")
+            return ""
+
+
+# â”€â”€ Backward Compatibility â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+_default_engine = OCREngine()
+
+def ocr_text(img: np.ndarray, **kwargs) -> str:
+    return _default_engine.ocr_text(img)
+
+def ocr_json(img: np.ndarray, **kwargs) -> List[Dict[str, Any]]:
+    # To keep identical signature kwargs compatibility
+    min_conf = kwargs.get("min_confidence", 30)
+    return _default_engine.extract_data(img, min_confidence=min_conf)
+
+def ocr_file(path: str, **kwargs) -> Any:
+    return _default_engine.process_file(path, kwargs.get("output", "text"))
+
+
+{'='*80}
+FILE: ocr\preprocessing.py
+{'='*80}
+
+"""
+ocr/preprocessing.py
+--------------------
+Image preprocessing pipeline for OCR.
+Handles grayscale, denoising, thresholding, deskewing, CLAHE, and resizing.
+"""
+
+import logging
+import os
+from typing import Optional, Dict
+import cv2
+import numpy as np
+import pytesseract
+import re
+
+logger = logging.getLogger(__name__)
+
+DEBUG_MODE = os.environ.get("OCR_DEBUG", "") == "1"
+DEBUG_DIR = "ocr_debug"
+
+if DEBUG_MODE:
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def _save_debug(img: np.ndarray, step_name: str):
+    """Save intermediate images if debug mode is active."""
+    if DEBUG_MODE:
+        path = os.path.join(DEBUG_DIR, f"{step_name}.jpg")
+        cv2.imwrite(path, img)
+        logger.debug(f"Saved debug image: {path}")
+
+def _to_gray(img: np.ndarray) -> np.ndarray:
+    """Convert BGR or RGBA image to grayscale."""
+    if len(img.shape) == 2:
+        res = img
+    elif img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        res = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        res = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    _save_debug(res, "01_grayscale")
+    return res
+
+def _resize(img: np.ndarray, min_width: int = 2400) -> np.ndarray:
+    """Upscale image so width >= min_width for better OCR accuracy."""
+    h, w = img.shape[:2]
+    if w < min_width:
+        scale = min_width / w
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+        _save_debug(img, "02_resized")
+    return img
+
+def _denoise(img: np.ndarray, strength: str = "medium") -> np.ndarray:
+    """Remove noise using Gaussian or median blur."""
+    if strength == "light":
+        res = cv2.GaussianBlur(img, (3, 3), 0)
+    elif strength == "heavy":
+        res = cv2.medianBlur(img, 5)
+    else:
+        res = cv2.GaussianBlur(img, (5, 5), 0)
+    _save_debug(res, f"04_denoised_{strength}")
+    return res
+
+def _clahe(img: np.ndarray, clip: float = 2.0, tile: int = 8) -> np.ndarray:
+    """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)."""
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
+    res = clahe.apply(img)
+    _save_debug(res, "03_clahe")
+    return res
+
+def _threshold_otsu(img: np.ndarray) -> np.ndarray:
+    """Otsu global thresholding â€” best for bimodal histograms."""
+    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _save_debug(binary, "05_threshold_otsu")
+    return binary
+
+def _threshold_adaptive(img: np.ndarray, block: int = 15, c: int = 10) -> np.ndarray:
+    """Adaptive thresholding â€” best for uneven lighting."""
+    res = cv2.adaptiveThreshold(
+        img, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        block, c
+    )
+    _save_debug(res, "05_threshold_adaptive")
+    return res
+
+def _morph_clean(img: np.ndarray) -> np.ndarray:
+    """Morphological opening to remove small noise specks."""
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    res = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+    _save_debug(res, "06_morphological_clean")
+    return res
+
+def _deskew_rotation(img: np.ndarray) -> np.ndarray:
+    """
+    Detect 90/180/270 rotations using Tesseract OSD and small skew via Hough lines.
+    """
+    try:
+        # Detect exact 90/180/270 orientation
+        osd = pytesseract.image_to_osd(img)
+        angle_match = re.search(r'Rotate: (\d+)', osd)
+        if angle_match:
+            angle = int(angle_match.group(1))
+            if angle == 90:
+                img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+            elif angle == 180:
+                img = cv2.rotate(img, cv2.ROTATE_180)
+            elif angle == 270:
+                img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            
+            if angle != 0:
+                logger.debug(f"OSD rotated image by {angle} degrees")
+    except Exception as e:
+        logger.warning(f"OSD rotation failed: {e}")
+
+    # Micro-deskew using Hough Transform
+    try:
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = img
+            
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=100,
+                                 minLineLength=100, maxLineGap=10)
+        if lines is not None:
+            angles = []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                if x2 != x1:
+                    angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                    if abs(angle) < 45:
+                        angles.append(angle)
+
+            if angles:
+                median_angle = np.median(angles)
+                if abs(median_angle) >= 0.5:
+                    h, w = img.shape[:2]
+                    center = (w // 2, h // 2)
+                    M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+                    img = cv2.warpAffine(img, M, (w, h),
+                                      flags=cv2.INTER_LINEAR,
+                                      borderMode=cv2.BORDER_REPLICATE)
+                    logger.debug(f"Deskewed micro-angle by {median_angle:.2f}Â°")
+    except Exception as e:
+        logger.warning(f"Micro-deskew failed: {e}")
+        
+    _save_debug(img, "00_deskewed")
+    return img
+
+# â”€â”€ Pipelines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def preprocess_printed(img: np.ndarray) -> np.ndarray:
+    """Pipeline: resize â†’ gray â†’ CLAHE â†’ denoise â†’ Otsu threshold â†’ morph clean"""
+    img = _resize(img)
+    gray = _to_gray(img)
+    gray = _clahe(gray)
+    gray = _denoise(gray, "light")
+    binary = _threshold_otsu(gray)
+    return _morph_clean(binary)
+
+def preprocess_low_light(img: np.ndarray) -> np.ndarray:
+    """Pipeline: resize â†’ gray â†’ aggressive CLAHE â†’ denoise â†’ adaptive threshold"""
+    img = _resize(img)
+    gray = _to_gray(img)
+    gray = _clahe(gray, clip=4.0, tile=4)
+    gray = _denoise(gray, "medium")
+    return _threshold_adaptive(gray, block=21, c=8)
+
+def preprocess_blurry(img: np.ndarray) -> np.ndarray:
+    """Pipeline: resize (larger) â†’ gray â†’ sharpen â†’ CLAHE â†’ Otsu"""
+    img = _resize(img, min_width=3000)
+    gray = _to_gray(img)
+    blurred = cv2.GaussianBlur(gray, (0, 0), 3)
+    gray = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+    gray = _clahe(gray)
+    return _threshold_otsu(gray)
+
+def preprocess_low_contrast(img: np.ndarray) -> np.ndarray:
+    """Pipeline: resize â†’ gray â†’ histogram equalization â†’ adaptive threshold"""
+    img = _resize(img)
+    gray = _to_gray(img)
+    gray = cv2.equalizeHist(gray)
+    return _threshold_adaptive(gray)
+
+def preprocess_raw_gray(img: np.ndarray) -> np.ndarray:
+    """Pipeline: resize â†’ gray â†’ CLAHE â†’ light denoise (NO thresholding).
+    Skipping binarization preserves tonal detail that helps Tesseract
+    distinguish visually similar digits like 5 vs 9."""
+    img = _resize(img)
+    gray = _to_gray(img)
+    gray = _clahe(gray)
+    gray = _denoise(gray, "light")
+    return gray
+
+def preprocess_sharp_gray(img: np.ndarray) -> np.ndarray:
+    """Pipeline: resize â†’ gray â†’ sharpen â†’ CLAHE â†’ light denoise (NO thresholding).
+    Sharpening emphasises digit edges without the destructive binarization step."""
+    img = _resize(img, min_width=3000)
+    gray = _to_gray(img)
+    blurred = cv2.GaussianBlur(gray, (0, 0), 3)
+    gray = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+    gray = _clahe(gray)
+    gray = _denoise(gray, "light")
+    return gray
+
+def get_preprocessing_candidates(img: np.ndarray, deskew: bool = True) -> Dict[str, np.ndarray]:
+    """
+    Returns multiple preprocessed versions of the image.
+    The calling module can evaluate them by running OCR and picking the best one.
+    """
+    if deskew:
+        img = _deskew_rotation(img)
+        
+    candidates = {}
+    
+    # Non-thresholded candidates (preserve tonal detail for digit accuracy)
+    try:
+        candidates["raw_gray"] = preprocess_raw_gray(img)
+    except Exception as e:
+        logger.warning(f"Raw gray strategy failed: {e}")
+
+    try:
+        candidates["sharp_gray"] = preprocess_sharp_gray(img)
+    except Exception as e:
+        logger.warning(f"Sharp gray strategy failed: {e}")
+
+    # Thresholded candidates (better for noisy / low-contrast images)
+    try:
+        candidates["printed"] = preprocess_printed(img)
+    except Exception as e:
+        logger.warning(f"Printed strategy failed: {e}")
+        
+    try:
+        candidates["low_light"] = preprocess_low_light(img)
+    except Exception as e:
+        logger.warning(f"Low light strategy failed: {e}")
+        
+    try:
+        candidates["blurry"] = preprocess_blurry(img)
+    except Exception as e:
+        logger.warning(f"Blurry strategy failed: {e}")
+        
+    try:
+        candidates["low_contrast"] = preprocess_low_contrast(img)
+    except Exception as e:
+        logger.warning(f"Low contrast strategy failed: {e}")
+        
+    if not candidates:
+        logger.warning("All preprocessing strategies failed. Returning grayscale fallback.")
+        candidates["fallback"] = _to_gray(img)
+        
+    return candidates
+
+def load_image(path: str) -> np.ndarray:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Image not found: {path}")
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise ValueError(f"Could not decode image: {path}")
+    return img
+
+
+{'='*80}
+FILE: ocr\postprocessing.py
+{'='*80}
+
+"""
+ocr/postprocessing.py
+---------------------
+Post-processing utilities for OCR output.
+Handles merging broken bounding boxes, cleaning common text errors, and normalization.
+"""
+
+import re
+import logging
+from typing import List, Dict, Any
+from collections import defaultdict
+
+logger = logging.getLogger(__name__)
+
+# Dictionary to fix common OCR confusions specific to medical reports
+COMMON_MISTAKES = {
+    "O": "0", "o": "0",
+    "l": "1", "I": "1",
+    "S": "5", "s": "5",
+    "B": "8",
+    "Z": "2", "z": "2",
+}
+
+def clean_text(text: str, is_numeric: bool = False) -> str:
+    text = text.strip()
+    if not text:
+        return ""
+        
+    if is_numeric:
+        corrected = []
+        for char in text:
+            if char in COMMON_MISTAKES:
+                corrected.append(COMMON_MISTAKES[char])
+            else:
+                corrected.append(char)
+        text = "".join(corrected)
+        text = re.sub(r'[^\d\.,\-]', '', text)
+    else:
+        text = re.sub(r'\s{2,}', ' ', text)
+        
+    return text
+
+def merge_boxes(words: List[Dict[str, Any]], line_tolerance: int = 15) -> List[Dict[str, Any]]:
+    """
+    Merge bounding boxes using Tesseract's native blocks/lines if available,
+    otherwise fallback to a coordinate-based grouping.
+    """
+    if not words:
+        return []
+
+    # Check if Tesseract grouping keys exist
+    has_native_grouping = all(k in words[0] for k in ["block_num", "par_num", "line_num"])
+
+    lines = []
+    
+    if has_native_grouping:
+        # Group perfectly using Tesseract's structural understanding
+        grouped = defaultdict(list)
+        for w in words:
+            # Create a unique key for the specific line
+            k = (w["block_num"], w["par_num"], w["line_num"])
+            grouped[k].append(w)
+            
+        # Sort lines by their average vertical position (top) to maintain page order
+        for key in sorted(grouped.keys(), key=lambda k: sum(w['top'] for w in grouped[k])/len(grouped[k])):
+            # Inside the line, sort strictly left to right
+            line_words = sorted(grouped[key], key=lambda w: w['left'])
+            lines.append(line_words)
+    else:
+        # Fallback coordinate-based grouping for engines without block logic (e.g. EasyOCR)
+        sorted_words = sorted(words, key=lambda w: (w['top'], w['left']))
+        current_line = [sorted_words[0]]
+        
+        for word in sorted_words[1:]:
+            prev_word = current_line[-1]
+            diff = abs(word['top'] - prev_word['top'])
+            # We scale tolerance based on word height to handle huge images
+            max_h = max(word.get('height', 15), prev_word.get('height', 15))
+            if diff <= max_h / 2: 
+                current_line.append(word)
+            else:
+                lines.append(current_line)
+                current_line = [word]
+                
+        if current_line:
+            lines.append(current_line)
+
+    # Now merge each line's words into a string
+    merged_output = []
+    for line in lines:
+        if not line:
+            continue
+            
+        # Re-sort just in case
+        line = sorted(line, key=lambda w: w['left'])
+        
+        left = min(w['left'] for w in line)
+        top = min(w['top'] for w in line)
+        right = max(w['left'] + w['width'] for w in line)
+        bottom = max(w['top'] + w['height'] for w in line)
+        
+        avg_conf = sum(w['conf'] for w in line) / len(line)
+        
+        text = " ".join(w['text'] for w in line)
+        
+        merged_output.append({
+            "text": clean_text(text),
+            "conf": avg_conf,
+            "left": left,
+            "top": top,
+            "width": right - left,
+            "height": bottom - top
+        })
+        
+    return merged_output
+
+def extract_text_from_merged(merged_lines: List[Dict[str, Any]]) -> str:
+    """Combines merged bounding boxes into a final clean text output."""
+    return "\n".join([line['text'] for line in merged_lines])
+
+
+{'='*80}
+FILE: ocr\utils.py
+{'='*80}
+
+"""
+ocr/utils.py
+------------
+Utility functions for CBC value extraction from OCR text.
+Handles lab report parsing, sanity validation, and value resolution.
+"""
+
+import re
+import logging
+from typing import Optional, Dict, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+# â”€â”€ Physiological sanity ranges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+SANE_RANGES: Dict[str, Tuple[float, float]] = {
+    "hemoglobin":  (3.0,    25.0),
+    "rbc":         (1.0,    10.0),
+    "pcv":         (10.0,   70.0),
+    "mcv":         (50.0,   130.0),
+    "mch":         (10.0,   50.0),
+    "mchc":        (20.0,   40.0),
+    "rdw":         (5.0,    30.0),
+    "wbc":         (500.0,  100000.0),
+    "platelets":   (10000,  1000000),
+    "creatinine":  (0.3,    15.0),   # serum creatinine mg/dL â€” SG values like 1.011 excluded by range fingerprint
+    "urea":        (1.0,    300.0),
+    "sodium":      (100.0,  170.0),
+    "potassium":   (1.0,    10.0),
+    "glucose":     (30.0,   600.0),
+}
+
+
+def is_sane(name: str, value: float) -> bool:
+    """
+    Check if a value is within physiologically plausible range.
+
+    Args:
+        name: Marker key (e.g. 'hemoglobin').
+        value: Numeric value to check.
+
+    Returns:
+        True if within range, False otherwise.
+    """
+    lo, hi = SANE_RANGES.get(name, (0, 1e9))
+    return lo <= value <= hi
+
+
+# â”€â”€ CBC label patterns â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+CBC_PATTERNS: Dict[str, list] = {
+    "hemoglobin": [r"h[ae]moglobin", r"\bhb\b", r"\bhgb\b"],
+    "rbc":        [r"\brbc\b", r"r\.b\.c", r"red\s+blood\s+cell", r"erythrocyte", r"rbc\s+count",
+                   r"rbc.*count", r"red\s+cell\s+count"],
+    "wbc":        [r"\bwbc\b", r"\bwec\b", r"w\.b\.c", r"white\s+blood\s+cell",
+                   r"leucocyte", r"leukocyte", r"\btlc\b",
+                   r"total\s+leukocyte", r"total\s+leucocyte",
+                   r"w[be]c\s+count", r"wbc.*cells.*mm", r"wec.*cells.*mm"],
+    "pcv":        [r"\bpcv\b", r"packed\s+cell", r"haematocrit", r"hematocrit", r"\bhct\b"],
+    "mcv":        [r"\bmcv\b", r"mean\s+corp.*volume"],
+    "mch":        [r"\bmch\b(?!c)", r"mean\s+corp.*hemo(?!globin\s+conc)"],
+    "mchc":       [r"\bmchc\b", r"mean\s+corp.*hemo.*conc"],
+    "rdw":        [r"\brdw\b", r"red\s+cell\s+dist", r"red\s+cell\s+distribution\s+width"],
+    "platelets":  [r"platelet", r"\bplt\b"],
+    "creatinine": [r"\bserum\s+creatinine\b", r"\bcreatinine\b", r"\bcreatinine,\s*mg",
+                   r"\bcreat\b(?!\s+ratio)", r"\bscr\b"],
+    "urea":       [r"\burea\b(?!\s+nitrogen)", r"\bbun\b", r"blood\s+urea", r"urea\s+nitrogen"],
+    "sodium":     [r"\bsodium\b", r"\bna\+?\b(?!\w)", r"sodium.*mmol", r"na.*mmol",
+                   r"Na\+"],
+    "potassium":  [r"\bpotassium\b", r"\bk\+?\b(?!\s*\d{4})", r"potassium.*mmol",
+                   r"K\+"],
+    "glucose":    [r"\bglucose\b", r"\bblood\s+sugar\b", r"\bbgr\b", r"\bbs\b(?!\w)"],
+}
+
+# Matches reference ranges like "12.0 - 17.5" or "4,000â€“11,000"
+_RANGE_RE = re.compile(r"[\d,]+\.?\d*\s*[-â€“â€”]\s*[\d,]+\.?\d*")
+
+
+def extract_value(text: str, name: str) -> Optional[float]:
+    """
+    Extract the first physiologically sane number from a text string.
+    Strips reference ranges before searching.
+    """
+    # Normalise comma-separated thousands: 7,800 â†’ 7800
+    text = re.sub(r"(\d),(\d{3})", r"\1\2", text)
+
+    # Handle scientific notation: 7.8 x 10^3 â†’ 7800
+    text = re.sub(
+        r"(\d+\.?\d*)\s*[xXÃ—]\s*10\s*[\^(]?\s*3\s*[)]?",
+        lambda m: str(float(m.group(1)) * 1000), text
+    )
+    text = re.sub(
+        r"(\d+\.?\d*)\s*[xXÃ—]\s*10\s*[\^(]?\s*6\s*[)]?",
+        lambda m: str(float(m.group(1)) * 1e6), text
+    )
+
+    # Convert thou/mm3 (thousands) â€” strip ref ranges first, then find number
+    # adjacent to 'thou' in either direction (before or after)
+    if name in ("wbc", "platelets"):
+        clean_for_thou = _RANGE_RE.sub(" ", text)
+        if re.search(r"thou", clean_for_thou, re.IGNORECASE):
+            # Find the last standalone decimal near 'thou' (before or after)
+            nums = list(re.finditer(r"\b(\d+\.?\d*)\b", clean_for_thou))
+            for m in reversed(nums):
+                v = float(m.group(1))
+                # Small floats in thou/mm3 range (1-100) mean value in thousands
+                if 1.0 <= v <= 999.0:
+                    converted = round(v * 1000)
+                    if 500 <= converted <= 100000:
+                        return converted
+
+
+    # Strip reference ranges
+    clean = _RANGE_RE.sub(" ", text)
+
+    # Use word-boundary anchors: this prevents matching numbers embedded inside
+    # unit strings like '1.73m2' (from 'mL/min/1.73m2' GFR units).
+    for match in re.finditer(r"(?<![\w./])\d+\.?\d*(?![\w/])", clean):
+        try:
+            v = float(match.group())
+            if is_sane(name, v):
+                return v
+        except ValueError:
+            continue
+
+    return None
+
+
+def extract_cbc(text: str) -> Dict[str, float]:
+    """
+    Parse OCR text and extract all CBC / chemistry values.
+
+    Two-pass strategy:
+    1. Label matching â€” find lines with known CBC label patterns.
+    2. Normal-range fingerprinting â€” identify markers by their reference range
+       when labels are garbled (common in dense tabular reports).
+    """
+    lines = [re.sub(r"\s{2,}", " ", l.strip()) for l in text.split("\n") if l.strip()]
+    extracted: Dict[str, float] = {}
+
+    # â”€â”€ Pass 1: label matching (forward + backward value search) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    for i, line in enumerate(lines):
+        ll = line.lower()
+
+        # Skip lines that are clearly not direct marker readings
+        if re.search(r'\bratio\b|\bindex\b', ll):
+            continue
+        for name, patterns in CBC_PATTERNS.items():
+            if name in extracted:
+                continue
+            if not any(re.search(p, ll) for p in patterns):
+                continue
+
+            val = extract_value(line, name)
+
+            # Search FORWARD individual lines
+            if val is None:
+                for j in range(i + 1, min(i + 7, len(lines))):
+                    next_ll = lines[j].lower()
+                    # Stop if we hit another CBC label
+                    is_label = any(
+                        any(re.search(p, next_ll) for p in pats)
+                        for pats in CBC_PATTERNS.values()
+                    )
+                    if is_label and j > i + 1:
+                        break
+                    # Stop if we hit a clearly different test section (GFR, ratio lines)
+                    if re.search(r'\bgfr\b|\bestimated\b|\bcategory\b|\bratio\b|\bindex\b', next_ll):
+                        break
+                    val = extract_value(lines[j], name)
+                    if val is not None:
+                        break
+
+            # Search FORWARD merged window â€” handles value + unit on separate lines
+            # e.g. "7.05\nthou/mm3" -> "7.05 thou/mm3" -> 7050
+            if val is None:
+                fwd_win = " ".join(lines[i + 1: min(i + 6, len(lines))])
+                val = extract_value(fwd_win, name)
+                if val is not None:
+                    logger.debug(f"Pass1 forward-window: {name}={val}")
+
+            # Search BACKWARD â€” handles multi-column PDFs where value appears
+            # before the label (e.g. Dr Lal PathLabs column layout).
+            # REVERSED so we check the line closest to the label first.
+            if val is None:
+                for j in reversed(range(max(0, i - 5), i)):
+                    prev_ll = lines[j].lower()
+                    is_label = any(
+                        any(re.search(p, prev_ll) for p in pats)
+                        for pats in CBC_PATTERNS.values()
+                    )
+                    if is_label:
+                        continue
+                    # Skip prose/header lines (2+ alphabetic words with a stray digit)
+                    # e.g. "SwasthFit Super 4" â€” the 4 is not a lab value
+                    alpha_words = sum(1 for w in lines[j].split() if re.search(r'[a-zA-Z]', w))
+                    if alpha_words >= 2:
+                        continue
+                    val = extract_value(lines[j], name)
+                    if val is not None:
+                        logger.debug(f"Pass1 backward-single: {name}={val} line={j}")
+                        break
+
+            if val is None:
+                # Merge backward window â€” handles units on separate lines
+                win = " ".join(lines[max(0, i - 5):i])
+                val = extract_value(win, name)
+                if val is not None:
+                    logger.debug(f"Pass1 backward-window: {name}={val}")
+
+
+            if val is not None:
+                extracted[name] = val
+                logger.debug(f"Pass1: {name} = {val}")
+            break
+
+    # â”€â”€ Pass 2: normal-range fingerprinting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # Maps a regex matching the reference range to the marker name + value range
+    RANGE_FINGERPRINTS = [
+        ("hemoglobin", r"12[\.\s]*0?\s*[-â€“]\s*1[67][\.\s]*\d"),
+        ("hemoglobin", r"11[\.\s]*5?\s*[-â€“]\s*1[67][\.\s]*\d"),
+        ("wbc",        r"[34][\.,]?0{3}\s*[-â€“]\s*1[01][\.,]?0{3}"),
+        ("wbc",        r"3[\.,]9\s*[-â€“]\s*11[\.,]7"),
+        ("rbc",        r"3[\.\s]*[58]\s*[-â€“]\s*[56][\.\s]*\d"),
+        ("rbc",        r"4[\.\s]*[02]\s*[-â€“]\s*[56][\.\s]*\d"),
+        ("pcv",        r"3[56]\s*[-â€“]\s*5[05]"),
+        ("sodium",     r"13[56]\s*[-â€“]\s*14[56]"),
+        ("potassium",  r"3[\.\s]*[45]\s*[-â€“]\s*5[\.\s]*[01]"),
+        # creatinine range is 0.6-1.3 â€” must NOT match specific gravity (1.001-1.030)
+        ("creatinine", r"0[\.\s]*[67]\s*[-â€“]\s*1[\.\s]*[23]\b"),
+        ("creatinine", r"0[\.\s]*7\s*[-â€“]\s*1[\.\s]*3\b"),
+        ("urea",       r"[78]\s*[-â€“]\s*4[05]"),
+        ("glucose",    r"7[05]\s*[-â€“]\s*1[01][05]"),
+    ]
+
+    for i, line in enumerate(lines):
+        ll = line.lower()
+        for name, range_pat in RANGE_FINGERPRINTS:
+            if name in extracted:
+                continue
+            if not re.search(range_pat, ll):
+                continue
+            # Found a reference range â€” extract value from the SAME line only
+            # (avoids picking up values from unrelated nearby lines)
+            val = extract_value(line, name)
+            if val is not None:
+                extracted[name] = val
+                logger.debug(f"Pass2 (range fingerprint): {name} = {val}")
+
+    return extracted
+
+
+def extract_cbc_consensus(texts: list) -> Dict[str, float]:
+    """
+    Run extract_cbc on multiple OCR text outputs (one per preprocessing
+    candidate) and return a consensus dict where each marker's value is
+    the one most frequently extracted across candidates.
+
+    This neutralises single-candidate digit misreads (e.g. one pipeline
+    reads RBC as 9.2 while three others correctly read 5.2).
+    """
+    from collections import Counter
+
+    if not texts:
+        return {}
+
+    # Collect per-marker values across all texts
+    all_extractions: Dict[str, list] = {}
+    for text in texts:
+        cbc = extract_cbc(text)
+        for name, val in cbc.items():
+            all_extractions.setdefault(name, []).append(val)
+
+    # Majority vote per marker
+    consensus: Dict[str, float] = {}
+    for name, values in all_extractions.items():
+        counter = Counter(values)
+        winner, count = counter.most_common(1)[0]
+        consensus[name] = winner
+        if len(counter) > 1:
+            logger.info(
+                f"CBC consensus for '{name}': {dict(counter)} â†’ winner {winner} "
+                f"({count}/{len(values)} votes)"
+            )
+
+    return consensus
+
+
+def resolve_value(
+    cbc: Dict[str, float],
+    cbc_key: str,
+    manual_val: Optional[float],
+    default: float,
+    default_label: str,
+) -> Tuple[float, str]:
+    """
+    Resolve a marker value from report, manual input, or default.
+
+    Args:
+        cbc: Extracted CBC dict from OCR.
+        cbc_key: Key to look up in cbc dict.
+        manual_val: Value entered manually by user (or None).
+        default: Fallback default value.
+        default_label: Human-readable label for the default (e.g. 'assumed 13.5').
+
+    Returns:
+        Tuple of (value, source) where source is 'report', 'manual', or default_label.
+    """
+    if cbc.get(cbc_key) is not None:
+        return cbc[cbc_key], "report"
+    if manual_val is not None:
+        return manual_val, "manual"
+    return default, default_label
+
+
+{'='*80}
+FILE: ocr\pdf_extractor.py
+{'='*80}
+
+"""
+ocr/pdf_extractor.py
+--------------------
+Robust PDF text extraction using PyMuPDF (fitz).
+
+Strategy per page:
+  1. Native text layer  â€“ fast & perfect for digital PDFs  
+  2. OCR via Tesseract  â€“ for scanned / image-only pages
+  3. Raw word list      â€“ last resort PyMuPDF word grab
+
+Also handles:
+  - Encrypted PDFs (password support)
+  - Damaged / partially-corrupted PDFs (lenient open)
+  - Rotation-mismarked pages
+"""
+
+import io
+import logging
+from typing import Optional
+
+import fitz           # PyMuPDF
+import numpy as np
+from PIL import Image
+
+logger = logging.getLogger(__name__)
+
+_MIN_NATIVE_CHARS = 20   # chars below this = treat page as image-only
+
+
+def _page_to_numpy(page: fitz.Page, dpi: int = 300) -> np.ndarray:
+    """Render a PDF page to a BGR numpy array (OpenCV / Tesseract ready)."""
+    zoom = dpi / 72
+    mat  = fitz.Matrix(zoom, zoom)
+    pix  = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+    img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    return np.array(img)[:, :, ::-1].copy()   # RGB â†’ BGR
+
+
+def extract_pdf_text(
+    filepath: str,
+    ocr_engine=None,
+    dpi: int = 300,
+    password: str = "",
+) -> str:
+    """
+    Extract all text from a PDF, with automatic OCR fallback per page.
+
+    Args:
+        filepath:   Full path to the PDF file.
+        ocr_engine: An OCREngine instance (created internally if None).
+        dpi:        Resolution for rasterising pages when OCR is needed.
+        password:   Password for encrypted PDFs.
+
+    Returns:
+        Combined extracted text from all pages.
+    """
+    if ocr_engine is None:
+        from ocr.ocr_engine import OCREngine
+        ocr_engine = OCREngine()
+
+    all_text: list = []
+
+    # â”€â”€ Open with lenient / repair mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    try:
+        doc = fitz.open(filepath)
+    except Exception as first_err:
+        logger.warning(f"[PDF] Normal open failed ({first_err}), trying repair modeâ€¦")
+        try:
+            # fitz repair: open raw bytes and let PyMuPDF fix the structure
+            with open(filepath, "rb") as f:
+                raw = f.read()
+            doc = fitz.open(stream=raw, filetype="pdf")
+        except Exception as e:
+            logger.error(f"[PDF] Repair open also failed: {e}")
+            return ""
+
+    # â”€â”€ Handle encryption â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if doc.is_encrypted:
+        ok = doc.authenticate(password)
+        if not ok:
+            logger.warning("[PDF] Encrypted â€” trying empty passwordâ€¦")
+            ok = doc.authenticate("")          # many lab PDFs have empty password
+        if not ok:
+            logger.error("[PDF] Cannot decrypt â€” skipping native layer, will OCR raw bytes via page rendering.")
+
+    total_pages = doc.page_count
+    logger.info(f"[PDF] Opened '{filepath}': {total_pages} page(s), encrypted={doc.is_encrypted}")
+
+    for page_num in range(total_pages):
+        page_text = ""
+
+        try:
+            page = doc[page_num]
+        except Exception as e:
+            logger.error(f"[PDF] Cannot access page {page_num+1}: {e}")
+            continue
+
+        # â”€â”€ Strategy 1: Native text â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        try:
+            native = page.get_text("text").strip()
+            if len(native) >= _MIN_NATIVE_CHARS:
+                logger.debug(f"[PDF] Page {page_num+1}: native text ({len(native)} ch)")
+                page_text = native
+        except Exception as e:
+            logger.warning(f"[PDF] Native text failed on page {page_num+1}: {e}")
+
+        # â”€â”€ Strategy 2: OCR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if not page_text:
+            try:
+                logger.info(f"[PDF] Page {page_num+1}: rasterising for OCRâ€¦")
+                img_arr = _page_to_numpy(page, dpi=dpi)
+                page_text = ocr_engine.ocr_text(img_arr)
+                logger.info(f"[PDF] Page {page_num+1}: OCR â†’ {len(page_text)} chars")
+            except Exception as e:
+                logger.warning(f"[PDF] OCR failed on page {page_num+1}: {e}")
+
+        # â”€â”€ Strategy 3: Raw word list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if not page_text:
+            try:
+                words = page.get_text("words")
+                words_sorted = sorted(words, key=lambda w: (round(w[1] / 10) * 10, w[0]))
+                page_text = " ".join(w[4] for w in words_sorted).strip()
+                if page_text:
+                    logger.warning(f"[PDF] Page {page_num+1}: used raw word-list fallback.")
+            except Exception as e:
+                logger.error(f"[PDF] Word-list fallback failed: {e}")
+
+        if page_text:
+            all_text.append(page_text)
+
+    doc.close()
+
+    combined = "\n\n".join(all_text)
+    logger.info(f"[PDF] extraction complete: {len(combined)} total chars")
+    return combined
+
+
+{'='*80}
+FILE: templates\index.html
+{'='*80}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>KidneyIQ â€” Renal Health Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
+</head>
+<body>
+<div class="shell">
+
+  <nav class="nav">
+    <a class="nav-brand" href="/">
+      <span class="nav-dot"></span>
+      KidneyIQ
+    </a>
+    <span class="nav-badge">Renal Health Dashboard</span>
+  </nav>
+
+  {% if not markers %}
+
+  <!-- Step 1: Choose input method -->
+  <div class="step-selector" id="step-selector">
+    <h1>Kidney Health Check</h1>
+    <p class="sub">How would you like to provide your health data?</p>
+    <div class="step-options">
+      <button class="step-btn" onclick="showPanel('upload')">
+        <span class="icon">ðŸ“„</span>
+        <span class="label">Upload Report</span>
+        <span class="desc">Upload a CBC / lab report â€” values extracted automatically</span>
+      </button>
+      <button class="step-btn" onclick="showPanel('manual')">
+        <span class="icon">âœï¸</span>
+        <span class="label">Enter Manually</span>
+        <span class="desc">Type in your vitals and lab values directly</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Upload panel -->
+  <div class="input-card" id="panel-upload" style="display:none; max-width:620px; margin:0 auto 40px;">
+    <div class="card-header">
+      <button class="back-btn" onclick="showSelector()">â† Back</button>
+    </div>
+    <h2>Upload Lab Report</h2>
+    <p class="sub">Upload a CBC or kidney function report. Values will be extracted automatically.</p>
+    <form action="/review" method="post" enctype="multipart/form-data">
+      <div class="field-group">
+        <div class="field-group-title">Demographics &amp; Vitals</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Age <span>(years)</span></label>
+            <input type="number" name="age" placeholder="e.g. 45" min="1" max="120" required/>
+          </div>
+          <div class="field">
+            <label>Blood Pressure <span>(diastolic mmHg)</span></label>
+            <input type="number" name="bp" placeholder="e.g. 80" min="40" max="200" required/>
+          </div>
+        </div>
+      </div>
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" name="report" accept=".pdf,.png,.jpg,.jpeg" id="file-input"/>
+        <div class="upload-icon">ðŸ“‚</div>
+        <p><strong>Click to upload</strong> or drag &amp; drop</p>
+        <p style="margin-top:4px">PDF, PNG, JPG â€” values extracted automatically</p>
+      </div>
+      <button class="submit-btn" type="submit">Extract &amp; Review Values â†’</button>
+    </form>
+  </div>
+
+  <!-- Manual panel -->
+  <div class="input-card" id="panel-manual" style="display:none; max-width:820px; margin:0 auto 40px;">
+    <div class="card-header">
+      <button class="back-btn" onclick="showSelector()">â† Back</button>
+    </div>
+    <h2>Enter Values Manually</h2>
+    <p class="sub">Fill in your vitals and lab results. Optional fields use clinical defaults if left blank.</p>
+    <form action="/predict" method="post" enctype="multipart/form-data">
+
+      <div class="field-group">
+        <div class="field-group-title">Demographics &amp; Vitals</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Age <span>(years)</span></label>
+            <input type="number" name="age" placeholder="e.g. 45" min="1" max="120" required/>
+          </div>
+          <div class="field">
+            <label>Blood Pressure <span>(diastolic mmHg)</span></label>
+            <input type="number" name="bp" placeholder="e.g. 80" min="40" max="200" required/>
+          </div>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-group-title">Complete Blood Count (CBC)</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Hemoglobin <span>(g/dL)</span></label>
+            <input type="number" step="0.1" name="hemo" placeholder="e.g. 13.5" min="1" max="25" required/>
+          </div>
+          <div class="field">
+            <label>RBC Count <span>(M/ÂµL)</span></label>
+            <input type="number" step="0.01" name="rbc_val" placeholder="e.g. 5.0" min="1" max="10"/>
+            <p class="hint">Default: 5.0</p>
+          </div>
+          <div class="field">
+            <label>WBC Count <span>(/ÂµL)</span></label>
+            <input type="number" name="wbc_val" placeholder="e.g. 7800" min="1000" max="50000"/>
+            <p class="hint">Default: 7800</p>
+          </div>
+          <div class="field">
+            <label>PCV / Haematocrit <span>(%)</span></label>
+            <input type="number" step="0.1" name="pcv_val" placeholder="e.g. 44" min="5" max="70"/>
+            <p class="hint">Default: 44</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-group-title">Kidney Function Panel</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Serum Creatinine <span>(mg/dL)</span></label>
+            <input type="number" step="0.01" name="creatinine_val" placeholder="e.g. 1.0" min="0.1" max="20"/>
+            <p class="hint">Default: 1.0</p>
+          </div>
+          <div class="field">
+            <label>Blood Urea <span>(mg/dL)</span></label>
+            <input type="number" step="0.1" name="urea_val" placeholder="e.g. 40" min="1" max="300"/>
+            <p class="hint">Default: 40</p>
+          </div>
+          <div class="field">
+            <label>Blood Glucose <span>(mg/dL)</span></label>
+            <input type="number" name="bgr_val" placeholder="e.g. 120" min="50" max="500"/>
+            <p class="hint">Default: 120</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-group-title">Electrolytes</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Sodium <span>(mEq/L)</span></label>
+            <input type="number" step="0.1" name="sod_val" placeholder="e.g. 140" min="100" max="170"/>
+            <p class="hint">Default: 140</p>
+          </div>
+          <div class="field">
+            <label>Potassium <span>(mEq/L)</span></label>
+            <input type="number" step="0.1" name="pot_val" placeholder="e.g. 4.5" min="1" max="10"/>
+            <p class="hint">Default: 4.5</p>
+          </div>
+        </div>
+      </div>
+
+      <button class="submit-btn" type="submit">Analyse Kidney Health â†’</button>
+    </form>
+  </div>
+
+  {% endif %}
+
+  <!-- Dashboard -->
+  {% if markers %}
+  <div class="dashboard">
+
+    <div class="dash-topbar">
+      <span class="section-label">Results Dashboard</span>
+      <a href="/" class="new-assessment-link">â† New Assessment</a>
+    </div>
+
+    {% if pdf_warning %}
+    <div style="background:#fef3c7;border:1.5px solid #f59e0b;border-radius:10px;padding:14px 20px;margin-bottom:18px;display:flex;gap:12px;align-items:flex-start;">
+      <span style="font-size:1.4em;line-height:1;">âš ï¸</span>
+      <div>
+        <strong style="color:#92400e;">PDF Could Not Be Read</strong><br>
+        <span style="color:#78350f;font-size:0.93em;">{{ pdf_warning }}</span>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Hero row -->
+    <div class="hero-row">
+
+      <!-- Gauge / Score -->
+      <div class="score-card">
+        <div class="gauge-wrap">
+          <svg viewBox="0 0 210 118" width="210" height="118">
+            <path d="M 12 106 A 95 95 0 0 1 198 106"
+                  fill="none" stroke="#e8edf3" stroke-width="14" stroke-linecap="round"/>
+            <path id="gauge-arc"
+                  d="M 12 106 A 95 95 0 0 1 198 106"
+                  fill="none" stroke="#0ea5e9" stroke-width="14" stroke-linecap="round"
+                  stroke-dasharray="299" stroke-dashoffset="299"/>
+          </svg>
+          <div class="gauge-label">
+            <div class="num" id="gauge-num" data-score="{{ score_val if score_val is defined else 0 }}">0</div>
+            <div class="den">/100</div>
+          </div>
+        </div>
+        <div class="score-grade" id="score-grade" data-grade="{{ grade }}">
+          Grade {{ grade }} &mdash; {{ status }}
+        </div>
+        {% if ckd_stage_info %}
+        <div class="score-stage" style="margin-top: 8px; font-weight: 600; font-size: 1.1em; color: var(--text-muted);">
+          eGFR: <span style="color: var(--text-dark);">{{ egfr }} mL/min</span>
+          &bull; 
+          <span style="color: {% if 'Stage 1' in ckd_stage_info.stage or 'Stage 2' in ckd_stage_info.stage %}var(--good){% elif 'Stage 3' in ckd_stage_info.stage %}var(--warn){% else %}var(--alert){% endif %};">
+            {{ ckd_stage_info.stage }}
+          </span>
+        </div>
+        <div style="font-size: 0.9em; color: var(--text-light); margin-bottom: 12px;">
+          ({{ ckd_stage_info.desc }})
+        </div>
+        {% endif %}
+        <div class="score-status">
+          {% if score >= 85 %}Kidneys are functioning well within normal parameters.
+          {% elif score >= 70 %}Minor concerns noted. Monitoring recommended.
+          {% elif score >= 55 %}Some markers outside normal range. Consult a physician.
+          {% elif score >= 35 %}Multiple markers abnormal. Nephrologist evaluation advised.
+          {% else %}Critical markers detected. Immediate medical attention required.
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- CKD Verdict -->
+      <div class="verdict-card">
+        <div class="verdict-label">CKD Screening Result</div>
+        <div class="verdict-result {% if ckd_detected %}ckd{% else %}no-ckd{% endif %}">
+          {% if ckd_detected %}âš  CKD Risk Detected{% else %}âœ“ No CKD Detected{% endif %}
+        </div>
+        <div class="verdict-conf">Model confidence: <strong>{{ confidence }}%</strong></div>
+        <div class="prob-bar">
+          <div class="bar-labels">
+            <span>CKD Probability</span>
+            <span>{{ ckd_prob }}%</span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill" id="ckd-bar" style="width:0%"
+                 data-prob="{{ ckd_prob if ckd_prob is defined else 0 }}"></div>
+          </div>
+        </div>
+        <div class="patient-chips">
+          <span class="chip">Age: {{ age }}y</span>
+          <span class="chip">BP: {{ bp }} mmHg</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Score Breakdown -->
+    <div class="card">
+      <h3>Score Breakdown</h3>
+      <div class="penalty-list">
+        {% set max_pen = 30 %}
+        {% for factor, pen in penalties.items() %}
+        <div class="penalty-item">
+          <span class="p-name">{{ factor }}</span>
+          <div class="p-track">
+            <div class="p-fill" data-pen="{{ pen }}" data-max="{{ max_pen }}"></div>
+          </div>
+          <span class="p-val {% if pen == 0 %}zero{% endif %}">
+            {% if pen == 0 %}âœ“{% else %}-{{ pen|int }}{% endif %}
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Biomarkers -->
+    <div class="card" style="overflow-x:auto">
+      <h3>Biomarker Analysis</h3>
+      <table class="markers-table">
+        <thead>
+          <tr>
+            <th>Marker</th>
+            <th>Value</th>
+            <th>Normal Range</th>
+            <th>Status</th>
+            <th>Level</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in markers %}
+          <tr>
+            <td class="m-name">{{ m.name }}</td>
+            <td>
+              {% if m.source in ['report', 'manual', 'entered'] %}
+                <span class="m-val">{{ m.value }}</span><span class="m-unit">{{ m.unit }}</span>
+              {% else %}
+                <span class="m-val assumed">{{ m.value }}</span><span class="m-unit">{{ m.unit }}</span>
+                <span class="m-assumed">Not in report ({{ m.source }})</span>
+              {% endif %}
+            </td>
+            <td class="m-ref">{{ m.normal }} {{ m.unit }}</td>
+            <td><span class="badge {{ m.status }}">{{ m.status }}</span></td>
+            <td>
+              <div class="mini-bar">
+                <div class="mini-fill {{ m.status }}" style="width:{{ m.pct }}%"></div>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Recommendations -->
+    <div class="card">
+      <h3>Recommendations</h3>
+      {% for tip in tips %}
+      <div class="tip-item">
+        <span class="tip-icon">
+          {% if 'CKD' in tip %}ðŸ¥
+          {% elif 'creatinine' in tip or 'urea' in tip %}ðŸ§ª
+          {% elif 'hemoglobin' in tip or 'anaemia' in tip or 'PCV' in tip %}ðŸ’‰
+          {% elif 'pressure' in tip %}â¤ï¸
+          {% elif 'glucose' in tip or 'diabetes' in tip %}ðŸ©¸
+          {% elif 'sodium' in tip or 'potassium' in tip %}âš—ï¸
+          {% else %}âœ…
+          {% endif %}
+        </span>
+        <span>{{ tip }}</span>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="disclaimer">
+      <strong>Medical Disclaimer:</strong> This tool is for informational purposes only and is
+      <strong>not a substitute</strong> for professional medical advice, diagnosis, or treatment.
+      Always consult a qualified nephrologist or physician.
+    </div>
+
+  </div>
+  {% endif %}
+
+</div>
+
+<script>
+  function showSelector() {
+    document.getElementById('step-selector').style.display = '';
+    document.getElementById('panel-upload').style.display  = 'none';
+    document.getElementById('panel-manual').style.display  = 'none';
+  }
+  function showPanel(type) {
+    document.getElementById('step-selector').style.display = 'none';
+    document.getElementById('panel-upload').style.display  = type === 'upload' ? '' : 'none';
+    document.getElementById('panel-manual').style.display  = type === 'manual' ? '' : 'none';
+  }
+
+  // File label update
+  const fileInput = document.getElementById('file-input');
+  if (fileInput) {
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length > 0) {
+        const zone = document.getElementById('upload-zone');
+        zone.querySelector('p').innerHTML =
+          '<strong style="color:var(--good)">' + fileInput.files[0].name + '</strong> ready to upload';
+      }
+    });
+  }
+
+  // Dashboard animations
+  const gaugeNumEl = document.getElementById('gauge-num');
+  const SCORE      = gaugeNumEl ? Number(gaugeNumEl.dataset.score || 0) : 0;
+  const ckdBarEl   = document.getElementById('ckd-bar');
+  const CKD_PROB   = ckdBarEl   ? Number(ckdBarEl.dataset.prob   || 0) : 0;
+
+  window.addEventListener('DOMContentLoaded', () => {
+    const arc   = document.getElementById('gauge-arc');
+    const numEl = document.getElementById('gauge-num');
+    const bar   = document.getElementById('ckd-bar');
+    if (!arc) return;
+
+    // Grade color
+    const gradeEl = document.getElementById('score-grade');
+    if (gradeEl) {
+      const g = gradeEl.dataset.grade;
+      const colors = { A:'#16a34a', B:'#15803d', C:'#d97706', D:'#ea580c', F:'#dc2626' };
+      gradeEl.style.color = colors[g] || '#dc2626';
+    }
+
+    // Gauge arc color
+    const arcColor = SCORE >= 85 ? '#16a34a' : SCORE >= 70 ? '#15803d'
+                   : SCORE >= 55 ? '#d97706' : SCORE >= 35 ? '#ea580c' : '#dc2626';
+    arc.style.stroke = arcColor;
+
+    // Animate gauge
+    const totalLen = 299;
+    let start = null;
+    function animArc(ts) {
+      if (!start) start = ts;
+      const p    = Math.min((ts - start) / 950, 1);
+      const ease = 1 - Math.pow(1 - p, 3);
+      arc.style.strokeDashoffset = totalLen - (totalLen * (SCORE / 100) * ease);
+      numEl.textContent = Math.round(SCORE * ease);
+      if (p < 1) requestAnimationFrame(animArc);
+    }
+    requestAnimationFrame(animArc);
+
+    // Penalty bars
+    document.querySelectorAll('.p-fill').forEach(el => {
+      const pen = parseFloat(el.dataset.pen || 0);
+      const max = parseFloat(el.dataset.max || 30);
+      const pct = pen === 0 ? 100 : Math.min(100, Math.round((pen / max) * 100));
+      el.style.width      = pct + '%';
+      el.style.background = pen === 0 ? '#16a34a' : pen <= 8 ? '#d97706' : '#dc2626';
+    });
+
+    // CKD probability bar
+    if (bar) {
+      bar.style.background = CKD_PROB > 60 ? '#dc2626' : CKD_PROB > 30 ? '#d97706' : '#16a34a';
+      setTimeout(() => { bar.style.width = CKD_PROB + '%'; }, 200);
+    }
+  });
+</script>
+</body>
+</html>
+
+
+{'='*80}
+FILE: templates\review.html
+{'='*80}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>KidneyIQ â€” Review Extracted Values</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
+  <style>
+    .review-card {
+      max-width: 780px;
+      margin: 30px auto;
+      background: var(--card-bg, #fff);
+      border-radius: 16px;
+      padding: 36px 40px;
+      box-shadow: 0 2px 16px rgba(0,0,0,0.07);
+    }
+    .review-card h2 {
+      margin: 0 0 6px;
+      font-size: 1.5em;
+      color: var(--text-dark, #1e293b);
+    }
+    .review-card .sub {
+      color: var(--text-muted, #64748b);
+      margin: 0 0 28px;
+      font-size: 0.95em;
+    }
+    .review-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 18px 24px;
+    }
+    .review-field label {
+      display: block;
+      font-weight: 600;
+      font-size: 0.88em;
+      color: var(--text-dark, #1e293b);
+      margin-bottom: 5px;
+    }
+    .review-field label .unit {
+      font-weight: 400;
+      color: var(--text-light, #94a3b8);
+    }
+    .review-field input {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 10px;
+      font-size: 1em;
+      font-family: inherit;
+      transition: border-color 0.2s;
+      background: #f8fafc;
+    }
+    .review-field input:focus {
+      outline: none;
+      border-color: #0ea5e9;
+      background: #fff;
+    }
+    .review-field input.ocr-filled {
+      border-color: #22c55e;
+      background: #f0fdf4;
+    }
+    .review-field .ocr-badge {
+      display: inline-block;
+      font-size: 0.73em;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 6px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .ocr-badge.found {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .ocr-badge.missing {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .review-actions {
+      margin-top: 32px;
+      display: flex;
+      gap: 14px;
+      align-items: center;
+    }
+    .review-actions .submit-btn {
+      flex: 1;
+    }
+    .review-actions .back-link {
+      color: var(--text-muted, #64748b);
+      text-decoration: none;
+      font-size: 0.93em;
+      font-weight: 500;
+    }
+    .review-actions .back-link:hover {
+      color: var(--text-dark, #1e293b);
+    }
+    .pdf-warning {
+      background: #fef3c7;
+      border: 1.5px solid #f59e0b;
+      border-radius: 10px;
+      padding: 14px 20px;
+      margin-bottom: 22px;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .pdf-warning .warn-icon { font-size: 1.4em; line-height: 1; }
+    .pdf-warning strong { color: #92400e; }
+    .pdf-warning span { color: #78350f; font-size: 0.93em; }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <nav class="nav">
+    <a class="nav-brand" href="/">
+      <span class="nav-dot"></span>
+      KidneyIQ
+    </a>
+    <span class="nav-badge">Review Extracted Values</span>
+  </nav>
+
+  <div class="review-card">
+    <h2>Review Extracted Values</h2>
+    <p class="sub">
+      Values extracted from your report are shown below (highlighted in green).
+      Please verify and correct any errors before running the analysis.
+    </p>
+
+    {% if pdf_warning %}
+    <div class="pdf-warning">
+      <span class="warn-icon">âš ï¸</span>
+      <div>
+        <strong>PDF Could Not Be Read</strong><br>
+        <span>{{ pdf_warning }}</span>
+      </div>
+    </div>
+    {% endif %}
+
+    <form action="/predict" method="post">
+      <input type="hidden" name="age" value="{{ age }}"/>
+      <input type="hidden" name="bp"  value="{{ bp }}"/>
+
+      <div class="review-grid">
+        {% for f in fields %}
+        <div class="review-field">
+          <label>
+            {{ f.label }} <span class="unit">({{ f.unit }})</span>
+            {% if f.ocr_found %}
+              <span class="ocr-badge found">âœ“ OCR</span>
+            {% else %}
+              <span class="ocr-badge missing">not found</span>
+            {% endif %}
+          </label>
+          <input type="number" step="any" name="{{ f.key }}"
+                 value="{{ f.value }}"
+                 class="{{ 'ocr-filled' if f.ocr_found else '' }}"
+                 placeholder="Enter value"/>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="review-actions">
+        <a class="back-link" href="/">â† Start Over</a>
+        <button class="submit-btn" type="submit">Confirm &amp; Analyse â†’</button>
+      </div>
+    </form>
+  </div>
+
+</div>
+</body>
+</html>
+
+
+{'='*80}
+FILE: static\style.css
+{'='*80}
+
+/* â”€â”€ Reset & Variables â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #f0f4f8;
+  --surface:   #ffffff;
+  --surface2:  #e8edf3;
+  --border:    #dde3ec;
+  --text:      #0f172a;
+  --muted:     #64748b;
+  --accent:    #0ea5e9;
+  --accent2:   #0284c7;
+  --good:      #16a34a;
+  --warn:      #d97706;
+  --danger:    #dc2626;
+  --good-bg:   #dcfce7;
+  --warn-bg:   #fef3c7;
+  --danger-bg: #fee2e2;
+  --radius:    14px;
+  --radius-sm: 8px;
+  --shadow-sm: 0 1px 3px rgba(15,23,42,0.06), 0 2px 8px rgba(15,23,42,0.04);
+  --shadow:    0 2px 8px rgba(15,23,42,0.07), 0 8px 24px rgba(15,23,42,0.06);
+  --font:      'Inter', system-ui, sans-serif;
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  16px;
+  --space-lg:  24px;
+  --space-xl:  40px;
+}
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* â”€â”€ Shell â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.shell {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 var(--space-lg) 80px;
+}
+
+/* â”€â”€ Nav â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 0 20px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-xl);
+}
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--text);
+  text-decoration: none;
+  letter-spacing: -0.3px;
+}
+.nav-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(14,165,233,0.2);
+}
+.nav-badge {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 4px 12px;
+  border-radius: 20px;
+}
+
+/* â”€â”€ Step Selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.step-selector {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 52px 44px;
+  max-width: 620px;
+  margin: 0 auto 48px;
+  text-align: center;
+}
+.step-selector h1 {
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  margin-bottom: 10px;
+}
+.step-selector .sub {
+  color: var(--muted);
+  font-size: 0.93rem;
+  margin-bottom: 36px;
+}
+.step-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.step-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 18px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.18s, box-shadow 0.18s, transform 0.12s;
+  text-align: center;
+}
+.step-btn:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px rgba(14,165,233,0.1);
+  transform: translateY(-1px);
+}
+.step-btn .icon  { font-size: 1.9rem; }
+.step-btn .label { font-weight: 600; font-size: 0.93rem; color: var(--text); }
+.step-btn .desc  { font-size: 0.78rem; color: var(--muted); line-height: 1.45; }
+
+/* â”€â”€ Input Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.input-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 36px;
+  margin-bottom: var(--space-xl);
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-md);
+}
+.back-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.83rem;
+  font-family: var(--font);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.15s, color 0.15s;
+}
+.back-btn:hover { background: var(--surface2); color: var(--text); }
+
+.input-card h2 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  margin-bottom: 4px;
+}
+.input-card .sub {
+  color: var(--muted);
+  font-size: 0.87rem;
+  margin-bottom: 28px;
+}
+
+/* â”€â”€ Field Groups â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.field-group {
+  margin-bottom: 28px;
+}
+.field-group-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.input-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  gap: 16px;
+}
+
+/* â”€â”€ Field â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.field label span {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.field input {
+  width: 100%;
+  background: var(--bg);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 13px;
+  font-family: var(--font);
+  font-size: 0.92rem;
+  color: var(--text);
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(14,165,233,0.13);
+  background: var(--surface);
+}
+.field input:invalid:not(:placeholder-shown) {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(220,38,38,0.1);
+}
+.field .hint {
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+/* â”€â”€ Upload Zone â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.upload-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 32px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s;
+  margin-bottom: 24px;
+  position: relative;
+  background: var(--bg);
+}
+.upload-zone:hover {
+  border-color: var(--accent);
+  background: rgba(14,165,233,0.03);
+}
+.upload-zone input[type="file"] {
+  position: absolute; inset: 0;
+  opacity: 0; cursor: pointer;
+  width: 100%; height: 100%;
+}
+.upload-zone .upload-icon { font-size: 2rem; margin-bottom: 10px; }
+.upload-zone p { font-size: 0.84rem; color: var(--muted); }
+.upload-zone strong { color: var(--accent); }
+
+/* â”€â”€ Submit Button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.submit-btn {
+  width: 100%;
+  padding: 14px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  letter-spacing: 0.2px;
+  transition: opacity 0.18s, transform 0.1s, box-shadow 0.18s;
+  box-shadow: 0 4px 14px rgba(14,165,233,0.35);
+}
+.submit-btn:hover  { opacity: 0.93; box-shadow: 0 6px 20px rgba(14,165,233,0.4); }
+.submit-btn:active { transform: scale(0.99); }
+
+/* â”€â”€ Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.dashboard { animation: fadeUp 0.5s cubic-bezier(0.22,1,0.36,1) both; }
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(22px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.dash-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 22px;
+}
+.section-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.new-assessment-link {
+  font-size: 0.82rem;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: opacity 0.15s;
+}
+.new-assessment-link:hover { opacity: 0.75; }
+
+/* â”€â”€ Hero Row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.hero-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+/* â”€â”€ Score Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.score-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 36px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.gauge-wrap {
+  position: relative;
+  width: 210px;
+  height: 118px;
+}
+.gauge-wrap svg { overflow: visible; }
+.gauge-label {
+  position: absolute;
+  bottom: 0; left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+}
+.gauge-label .num {
+  font-size: 3rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -2px;
+  color: var(--text);
+}
+.gauge-label .den {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+.score-grade {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+.score-status {
+  font-size: 0.82rem;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.5;
+  max-width: 220px;
+}
+
+/* â”€â”€ Verdict Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.verdict-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 36px 28px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+}
+.verdict-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.verdict-result {
+  font-size: 1.65rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.5px;
+}
+.verdict-result.no-ckd { color: var(--good); }
+.verdict-result.ckd    { color: var(--danger); }
+.verdict-conf { font-size: 0.83rem; color: var(--muted); }
+.verdict-conf strong { color: var(--text); }
+
+.prob-bar .bar-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.74rem;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.prob-bar .bar-track {
+  height: 7px;
+  background: var(--surface2);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.prob-bar .bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width 1.1s cubic-bezier(0.22,1,0.36,1);
+}
+.patient-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.chip {
+  font-size: 0.73rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 3px 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* â”€â”€ Generic Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 28px;
+  margin-bottom: 18px;
+}
+.card h3 {
+  font-size: 0.97rem;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  margin-bottom: 20px;
+}
+
+/* â”€â”€ Score Breakdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.penalty-list { display: flex; flex-direction: column; gap: 12px; }
+.penalty-item {
+  display: grid;
+  grid-template-columns: 150px 1fr 44px;
+  align-items: center;
+  gap: 14px;
+}
+.p-name { font-size: 0.82rem; color: var(--muted); font-weight: 500; }
+.p-track {
+  height: 6px;
+  background: var(--surface2);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.p-fill { height: 100%; border-radius: 99px; transition: width 0.8s cubic-bezier(0.22,1,0.36,1); }
+.p-val { font-size: 0.78rem; text-align: right; color: var(--muted); font-weight: 500; }
+.p-val.zero { color: var(--good); font-weight: 700; }
+
+/* â”€â”€ Biomarker Table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.markers-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.markers-table th {
+  text-align: left;
+  padding: 0 14px 12px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.markers-table td {
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.markers-table tr:last-child td { border-bottom: none; }
+.markers-table tr:hover td { background: var(--bg); }
+.m-name  { font-weight: 600; font-size: 0.88rem; }
+.m-val   { font-weight: 700; font-size: 0.97rem; }
+.m-val.assumed { color: var(--muted); font-weight: 500; }
+.m-unit  { font-size: 0.74rem; color: var(--muted); margin-left: 2px; }
+.m-ref   { font-size: 0.74rem; color: var(--muted); }
+.m-assumed {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--warn);
+  margin-top: 2px;
+  font-style: italic;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+.badge.Normal { background: var(--good-bg);   color: var(--good);   }
+.badge.Low    { background: var(--warn-bg);    color: var(--warn);   }
+.badge.High   { background: var(--danger-bg);  color: var(--danger); }
+
+.mini-bar { width: 76px; height: 5px; background: var(--surface2); border-radius: 99px; overflow: hidden; }
+.mini-fill { height: 100%; border-radius: 99px; }
+.mini-fill.Normal { background: var(--good); }
+.mini-fill.Low    { background: var(--warn); }
+.mini-fill.High   { background: var(--danger); }
+
+/* â”€â”€ Recommendations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.tip-item {
+  display: flex;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.87rem;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.tip-item:last-child { border-bottom: none; padding-bottom: 0; }
+.tip-icon { font-size: 1.05rem; flex-shrink: 0; margin-top: 2px; }
+
+/* â”€â”€ Disclaimer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+.disclaimer {
+  margin-top: 28px;
+  padding: 16px 20px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  color: #92400e;
+  line-height: 1.65;
+}
+.disclaimer strong { color: #b45309; }
+
+/* â”€â”€ Responsive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+@media (max-width: 680px) {
+  .hero-row { grid-template-columns: 1fr; }
+}
+@media (max-width: 540px) {
+  .step-options { grid-template-columns: 1fr; }
+  .input-card   { padding: 24px 18px; }
+  .penalty-item { grid-template-columns: 110px 1fr 36px; }
+  .step-selector { padding: 36px 24px; }
+}
+

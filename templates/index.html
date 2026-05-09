@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>KidneyIQ — Renal Health Dashboard</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
+</head>
+<body>
+<div class="shell">
+
+  <nav class="nav">
+    <a class="nav-brand" href="/">
+      <span class="nav-dot"></span>
+      KidneyIQ
+    </a>
+    <span class="nav-badge">Renal Health Dashboard</span>
+  </nav>
+
+  {% if not markers %}
+
+  <!-- Step 1: Choose input method -->
+  <div class="step-selector" id="step-selector">
+    <h1>Kidney Health Check</h1>
+    <p class="sub">How would you like to provide your health data?</p>
+    <div class="step-options">
+      <button class="step-btn" onclick="showPanel('upload')">
+        <span class="icon">📄</span>
+        <span class="label">Upload Report</span>
+        <span class="desc">Upload a CBC / lab report — values extracted automatically</span>
+      </button>
+      <button class="step-btn" onclick="showPanel('manual')">
+        <span class="icon">✏️</span>
+        <span class="label">Enter Manually</span>
+        <span class="desc">Type in your vitals and lab values directly</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Upload panel -->
+  <div class="input-card" id="panel-upload" style="display:none; max-width:620px; margin:0 auto 40px;">
+    <div class="card-header">
+      <button class="back-btn" onclick="showSelector()">← Back</button>
+    </div>
+    <h2>Upload Lab Report</h2>
+    <p class="sub">Upload a CBC or kidney function report. Values will be extracted automatically.</p>
+    <form action="/review" method="post" enctype="multipart/form-data">
+      <div class="field-group">
+        <div class="field-group-title">Demographics &amp; Vitals</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Age <span>(years)</span></label>
+            <input type="number" name="age" placeholder="e.g. 45" min="1" max="120" required/>
+          </div>
+          <div class="field">
+            <label>Blood Pressure <span>(diastolic mmHg)</span></label>
+            <input type="number" name="bp" placeholder="e.g. 80" min="40" max="200" required/>
+          </div>
+        </div>
+      </div>
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" name="report" accept=".pdf,.png,.jpg,.jpeg" id="file-input"/>
+        <div class="upload-icon">📂</div>
+        <p><strong>Click to upload</strong> or drag &amp; drop</p>
+        <p style="margin-top:4px">PDF, PNG, JPG — values extracted automatically</p>
+      </div>
+      <button class="submit-btn" type="submit">Extract &amp; Review Values →</button>
+    </form>
+  </div>
+
+  <!-- Manual panel -->
+  <div class="input-card" id="panel-manual" style="display:none; max-width:820px; margin:0 auto 40px;">
+    <div class="card-header">
+      <button class="back-btn" onclick="showSelector()">← Back</button>
+    </div>
+    <h2>Enter Values Manually</h2>
+    <p class="sub">Fill in your vitals and lab results. Optional fields use clinical defaults if left blank.</p>
+    <form action="/predict" method="post" enctype="multipart/form-data">
+
+      <div class="field-group">
+        <div class="field-group-title">Demographics &amp; Vitals</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Age <span>(years)</span></label>
+            <input type="number" name="age" placeholder="e.g. 45" min="1" max="120" required/>
+          </div>
+          <div class="field">
+            <label>Blood Pressure <span>(diastolic mmHg)</span></label>
+            <input type="number" name="bp" placeholder="e.g. 80" min="40" max="200" required/>
+          </div>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-group-title">Complete Blood Count (CBC)</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Hemoglobin <span>(g/dL)</span></label>
+            <input type="number" step="0.1" name="hemo" placeholder="e.g. 13.5" min="1" max="25" required/>
+          </div>
+          <div class="field">
+            <label>RBC Count <span>(M/µL)</span></label>
+            <input type="number" step="0.01" name="rbc_val" placeholder="e.g. 5.0" min="1" max="10"/>
+            <p class="hint">Default: 5.0</p>
+          </div>
+          <div class="field">
+            <label>WBC Count <span>(/µL)</span></label>
+            <input type="number" name="wbc_val" placeholder="e.g. 7800" min="1000" max="50000"/>
+            <p class="hint">Default: 7800</p>
+          </div>
+          <div class="field">
+            <label>PCV / Haematocrit <span>(%)</span></label>
+            <input type="number" step="0.1" name="pcv_val" placeholder="e.g. 44" min="5" max="70"/>
+            <p class="hint">Default: 44</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-group-title">Kidney Function Panel</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Serum Creatinine <span>(mg/dL)</span></label>
+            <input type="number" step="0.01" name="creatinine_val" placeholder="e.g. 1.0" min="0.1" max="20"/>
+            <p class="hint">Default: 1.0</p>
+          </div>
+          <div class="field">
+            <label>Blood Urea <span>(mg/dL)</span></label>
+            <input type="number" step="0.1" name="urea_val" placeholder="e.g. 40" min="1" max="300"/>
+            <p class="hint">Default: 40</p>
+          </div>
+          <div class="field">
+            <label>Blood Glucose <span>(mg/dL)</span></label>
+            <input type="number" name="bgr_val" placeholder="e.g. 120" min="50" max="500"/>
+            <p class="hint">Default: 120</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="field-group">
+        <div class="field-group-title">Electrolytes</div>
+        <div class="input-grid">
+          <div class="field">
+            <label>Sodium <span>(mEq/L)</span></label>
+            <input type="number" step="0.1" name="sod_val" placeholder="e.g. 140" min="100" max="170"/>
+            <p class="hint">Default: 140</p>
+          </div>
+          <div class="field">
+            <label>Potassium <span>(mEq/L)</span></label>
+            <input type="number" step="0.1" name="pot_val" placeholder="e.g. 4.5" min="1" max="10"/>
+            <p class="hint">Default: 4.5</p>
+          </div>
+        </div>
+      </div>
+
+      <button class="submit-btn" type="submit">Analyse Kidney Health →</button>
+    </form>
+  </div>
+
+  {% endif %}
+
+  <!-- Dashboard -->
+  {% if markers %}
+  <div class="dashboard">
+
+    <div class="dash-topbar">
+      <span class="section-label">Results Dashboard</span>
+      <a href="/" class="new-assessment-link">← New Assessment</a>
+    </div>
+
+    {% if pdf_warning %}
+    <div style="background:#fef3c7;border:1.5px solid #f59e0b;border-radius:10px;padding:14px 20px;margin-bottom:18px;display:flex;gap:12px;align-items:flex-start;">
+      <span style="font-size:1.4em;line-height:1;">⚠️</span>
+      <div>
+        <strong style="color:#92400e;">PDF Could Not Be Read</strong><br>
+        <span style="color:#78350f;font-size:0.93em;">{{ pdf_warning }}</span>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Hero row -->
+    <div class="hero-row">
+
+      <!-- Gauge / Score -->
+      <div class="score-card">
+        <div class="gauge-wrap">
+          <svg viewBox="0 0 210 118" width="210" height="118">
+            <path d="M 12 106 A 95 95 0 0 1 198 106"
+                  fill="none" stroke="#e8edf3" stroke-width="14" stroke-linecap="round"/>
+            <path id="gauge-arc"
+                  d="M 12 106 A 95 95 0 0 1 198 106"
+                  fill="none" stroke="#0ea5e9" stroke-width="14" stroke-linecap="round"
+                  stroke-dasharray="299" stroke-dashoffset="299"/>
+          </svg>
+          <div class="gauge-label">
+            <div class="num" id="gauge-num" data-score="{{ score_val if score_val is defined else 0 }}">0</div>
+            <div class="den">/100</div>
+          </div>
+        </div>
+        <div class="score-grade" id="score-grade" data-grade="{{ grade }}">
+          Grade {{ grade }} &mdash; {{ status }}
+        </div>
+        {% if ckd_stage_info %}
+        <div class="score-stage" style="margin-top: 8px; font-weight: 600; font-size: 1.1em; color: var(--text-muted);">
+          eGFR: <span style="color: var(--text-dark);">{{ egfr }} mL/min</span>
+          &bull; 
+          <span style="color: {% if 'Stage 1' in ckd_stage_info.stage or 'Stage 2' in ckd_stage_info.stage %}var(--good){% elif 'Stage 3' in ckd_stage_info.stage %}var(--warn){% else %}var(--alert){% endif %};">
+            {{ ckd_stage_info.stage }}
+          </span>
+        </div>
+        <div style="font-size: 0.9em; color: var(--text-light); margin-bottom: 12px;">
+          ({{ ckd_stage_info.desc }})
+        </div>
+        {% endif %}
+        <div class="score-status">
+          {% if score >= 85 %}Kidneys are functioning well within normal parameters.
+          {% elif score >= 70 %}Minor concerns noted. Monitoring recommended.
+          {% elif score >= 55 %}Some markers outside normal range. Consult a physician.
+          {% elif score >= 35 %}Multiple markers abnormal. Nephrologist evaluation advised.
+          {% else %}Critical markers detected. Immediate medical attention required.
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- CKD Verdict -->
+      <div class="verdict-card">
+        <div class="verdict-label">CKD Screening Result</div>
+        <div class="verdict-result {% if ckd_detected %}ckd{% else %}no-ckd{% endif %}">
+          {% if ckd_detected %}⚠ CKD Risk Detected{% else %}✓ No CKD Detected{% endif %}
+        </div>
+        <div class="verdict-conf">Model confidence: <strong>{{ confidence }}%</strong></div>
+        <div class="prob-bar">
+          <div class="bar-labels">
+            <span>CKD Probability</span>
+            <span>{{ ckd_prob }}%</span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill" id="ckd-bar" style="width:0%"
+                 data-prob="{{ ckd_prob if ckd_prob is defined else 0 }}"></div>
+          </div>
+        </div>
+        <div class="patient-chips">
+          <span class="chip">Age: {{ age }}y</span>
+          <span class="chip">BP: {{ bp }} mmHg</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Score Breakdown -->
+    <div class="card">
+      <h3>Score Breakdown</h3>
+      <div class="penalty-list">
+        {% set max_pen = 30 %}
+        {% for factor, pen in penalties.items() %}
+        <div class="penalty-item">
+          <span class="p-name">{{ factor }}</span>
+          <div class="p-track">
+            <div class="p-fill" data-pen="{{ pen }}" data-max="{{ max_pen }}"></div>
+          </div>
+          <span class="p-val {% if pen == 0 %}zero{% endif %}">
+            {% if pen == 0 %}✓{% else %}-{{ pen|int }}{% endif %}
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Biomarkers -->
+    <div class="card" style="overflow-x:auto">
+      <h3>Biomarker Analysis</h3>
+      <table class="markers-table">
+        <thead>
+          <tr>
+            <th>Marker</th>
+            <th>Value</th>
+            <th>Normal Range</th>
+            <th>Status</th>
+            <th>Level</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in markers %}
+          <tr>
+            <td class="m-name">{{ m.name }}</td>
+            <td>
+              {% if m.source in ['report', 'manual', 'entered'] %}
+                <span class="m-val">{{ m.value }}</span><span class="m-unit">{{ m.unit }}</span>
+              {% else %}
+                <span class="m-val assumed">{{ m.value }}</span><span class="m-unit">{{ m.unit }}</span>
+                <span class="m-assumed">Not in report ({{ m.source }})</span>
+              {% endif %}
+            </td>
+            <td class="m-ref">{{ m.normal }} {{ m.unit }}</td>
+            <td><span class="badge {{ m.status }}">{{ m.status }}</span></td>
+            <td>
+              <div class="mini-bar">
+                <div class="mini-fill {{ m.status }}" style="width:{{ m.pct }}%"></div>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Recommendations -->
+    <div class="card">
+      <h3>Recommendations</h3>
+      {% for tip in tips %}
+      <div class="tip-item">
+        <span class="tip-icon">
+          {% if 'CKD' in tip %}🏥
+          {% elif 'creatinine' in tip or 'urea' in tip %}🧪
+          {% elif 'hemoglobin' in tip or 'anaemia' in tip or 'PCV' in tip %}💉
+          {% elif 'pressure' in tip %}❤️
+          {% elif 'glucose' in tip or 'diabetes' in tip %}🩸
+          {% elif 'sodium' in tip or 'potassium' in tip %}⚗️
+          {% else %}✅
+          {% endif %}
+        </span>
+        <span>{{ tip }}</span>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="disclaimer">
+      <strong>Medical Disclaimer:</strong> This tool is for informational purposes only and is
+      <strong>not a substitute</strong> for professional medical advice, diagnosis, or treatment.
+      Always consult a qualified nephrologist or physician.
+    </div>
+
+  </div>
+  {% endif %}
+
+</div>
+
+<script>
+  function showSelector() {
+    document.getElementById('step-selector').style.display = '';
+    document.getElementById('panel-upload').style.display  = 'none';
+    document.getElementById('panel-manual').style.display  = 'none';
+  }
+  function showPanel(type) {
+    document.getElementById('step-selector').style.display = 'none';
+    document.getElementById('panel-upload').style.display  = type === 'upload' ? '' : 'none';
+    document.getElementById('panel-manual').style.display  = type === 'manual' ? '' : 'none';
+  }
+
+  // File label update
+  const fileInput = document.getElementById('file-input');
+  if (fileInput) {
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length > 0) {
+        const zone = document.getElementById('upload-zone');
+        zone.querySelector('p').innerHTML =
+          '<strong style="color:var(--good)">' + fileInput.files[0].name + '</strong> ready to upload';
+      }
+    });
+  }
+
+  // Dashboard animations
+  const gaugeNumEl = document.getElementById('gauge-num');
+  const SCORE      = gaugeNumEl ? Number(gaugeNumEl.dataset.score || 0) : 0;
+  const ckdBarEl   = document.getElementById('ckd-bar');
+  const CKD_PROB   = ckdBarEl   ? Number(ckdBarEl.dataset.prob   || 0) : 0;
+
+  window.addEventListener('DOMContentLoaded', () => {
+    const arc   = document.getElementById('gauge-arc');
+    const numEl = document.getElementById('gauge-num');
+    const bar   = document.getElementById('ckd-bar');
+    if (!arc) return;
+
+    // Grade color
+    const gradeEl = document.getElementById('score-grade');
+    if (gradeEl) {
+      const g = gradeEl.dataset.grade;
+      const colors = { A:'#16a34a', B:'#15803d', C:'#d97706', D:'#ea580c', F:'#dc2626' };
+      gradeEl.style.color = colors[g] || '#dc2626';
+    }
+
+    // Gauge arc color
+    const arcColor = SCORE >= 85 ? '#16a34a' : SCORE >= 70 ? '#15803d'
+                   : SCORE >= 55 ? '#d97706' : SCORE >= 35 ? '#ea580c' : '#dc2626';
+    arc.style.stroke = arcColor;
+
+    // Animate gauge
+    const totalLen = 299;
+    let start = null;
+    function animArc(ts) {
+      if (!start) start = ts;
+      const p    = Math.min((ts - start) / 950, 1);
+      const ease = 1 - Math.pow(1 - p, 3);
+      arc.style.strokeDashoffset = totalLen - (totalLen * (SCORE / 100) * ease);
+      numEl.textContent = Math.round(SCORE * ease);
+      if (p < 1) requestAnimationFrame(animArc);
+    }
+    requestAnimationFrame(animArc);
+
+    // Penalty bars
+    document.querySelectorAll('.p-fill').forEach(el => {
+      const pen = parseFloat(el.dataset.pen || 0);
+      const max = parseFloat(el.dataset.max || 30);
+      const pct = pen === 0 ? 100 : Math.min(100, Math.round((pen / max) * 100));
+      el.style.width      = pct + '%';
+      el.style.background = pen === 0 ? '#16a34a' : pen <= 8 ? '#d97706' : '#dc2626';
+    });
+
+    // CKD probability bar
+    if (bar) {
+      bar.style.background = CKD_PROB > 60 ? '#dc2626' : CKD_PROB > 30 ? '#d97706' : '#16a34a';
+      setTimeout(() => { bar.style.width = CKD_PROB + '%'; }, 200);
+    }
+  });
+</script>
+</body>
+</html>
