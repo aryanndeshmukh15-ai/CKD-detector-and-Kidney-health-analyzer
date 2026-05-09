@@ -141,6 +141,7 @@
     <form action="/predict" method="post">
       <input type="hidden" name="age" value="{{ age }}"/>
       <input type="hidden" name="bp"  value="{{ bp }}"/>
+      <textarea name="raw_ocr_text" style="display:none">{{ raw_ocr_text|default('') }}</textarea>
 
       <div class="review-grid">
         {% for f in fields %}

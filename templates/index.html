@@ -357,6 +357,28 @@
       Always consult a qualified nephrologist or physician.
     </div>
 
+
+
+    <!-- Report context for chatbot -->
+    <script type="application/json" id="chat-report-context">
+    {
+      "score": {{ score_val|default(0) }},
+      "grade": "{{ grade|default('') }}",
+      "status": "{{ status|default('') }}",
+      "ckd_detected": {{ 'true' if ckd_detected else 'false' }},
+      "confidence": {{ confidence|default(0) }},
+      "ckd_prob": {{ ckd_prob|default(0) }},
+      "age": {{ age|default(0) }},
+      "bp": {{ bp|default(0) }},
+      "egfr": {{ egfr|default(0) }},
+      "ckd_stage": "{{ ckd_stage_info.stage if ckd_stage_info else '' }}",
+      "ckd_stage_desc": "{{ ckd_stage_info.desc if ckd_stage_info else '' }}",
+      "markers": {{ markers|tojson }},
+      "tips": {{ tips|tojson }},
+      "raw_report_text": {{ (raw_ocr_text|default(''))|tojson }}
+    }
+    </script>
+
   </div>
   {% endif %}
 
@@ -698,6 +720,162 @@
 
     doc.save(`KidneyIQ_Report_${dateStr.replace(/ /g, '_')}.pdf`);
   }
+
+  // ── Chatbot ──────────────────────────────────────────────────────────────
+  let chatHistory = [];
+  let chatOpen = false;
+
+  function toggleChat() {
+    chatOpen = !chatOpen;
+    const overlay = document.getElementById('chat-overlay');
+    const fab = document.getElementById('chat-fab');
+    if (overlay) overlay.classList.toggle('open', chatOpen);
+    if (fab) fab.classList.toggle('hidden', chatOpen);
+    if (chatOpen) {
+      const input = document.getElementById('chat-input');
+      if (input) setTimeout(() => input.focus(), 100);
+    }
+  }
+
+  function getChatContext() {
+    const el = document.getElementById('chat-report-context');
+    if (!el) return {};
+    try { return JSON.parse(el.textContent); } catch(e) { return {}; }
+  }
+
+  function appendMessage(role, text) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chat-msg ' + role;
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    bubble.textContent = text;
+    wrapper.appendChild(bubble);
+    container.appendChild(wrapper);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function showTyping() {
+    const container = document.getElementById('chat-messages');
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chat-msg assistant';
+    wrapper.id = 'typing-indicator';
+    wrapper.innerHTML = '<div class="chat-bubble typing"><span></span><span></span><span></span></div>';
+    container.appendChild(wrapper);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function hideTyping() {
+    const el = document.getElementById('typing-indicator');
+    if (el) el.remove();
+  }
+
+  function sendChip(btn) {
+    const text = btn.textContent;
+    document.getElementById('chat-chips').style.display = 'none';
+    sendChat(text);
+  }
+
+  function sendChatMessage() {
+    const input = document.getElementById('chat-input');
+    const text = (input.value || '').trim();
+    if (!text) return;
+    input.value = '';
+    sendChat(text);
+  }
+
+  async function sendChat(text) {
+    appendMessage('user', text);
+    chatHistory.push({ role: 'user', content: text });
+    showTyping();
+
+    const sendBtn = document.getElementById('chat-send-btn');
+    const input = document.getElementById('chat-input');
+    sendBtn.disabled = true;
+    input.disabled = true;
+
+    try {
+      const resp = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: text,
+          history: chatHistory,
+          report_context: getChatContext()
+        })
+      });
+      const data = await resp.json();
+      hideTyping();
+      const reply = data.reply || 'Sorry, I could not generate a response.';
+      appendMessage('assistant', reply);
+      chatHistory.push({ role: 'assistant', content: reply });
+    } catch(e) {
+      hideTyping();
+      appendMessage('assistant', 'Connection error. Please try again.');
+    }
+
+    sendBtn.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+
+  // Enter key to send
+  document.addEventListener('DOMContentLoaded', () => {
+    const input = document.getElementById('chat-input');
+    if (input) {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendChatMessage();
+        }
+      });
+    }
+  });
 </script>
+
+{% if markers %}
+<!-- Chatbot FAB + Overlay (outside all containers for correct fixed positioning) -->
+<button class="chat-fab" id="chat-fab" onclick="toggleChat()" aria-label="Open chat">
+  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+  </svg>
+</button>
+
+<div class="chat-overlay" id="chat-overlay">
+  <div class="chat-header">
+    <div class="chat-header-left">
+      <span class="chat-dot"></span>
+      <span class="chat-title">KidneyIQ Assistant</span>
+    </div>
+    <span class="chat-badge">AI</span>
+    <button class="chat-close" onclick="toggleChat()" aria-label="Close chat">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="chat-body" id="chat-body">
+    <div class="chat-messages" id="chat-messages">
+      <div class="chat-msg assistant">
+        <div class="chat-bubble">
+          Hi! I'm your KidneyIQ Assistant. I've reviewed your report and I'm here to help you understand your results. Ask me anything!
+        </div>
+      </div>
+    </div>
+    <div class="chat-chips" id="chat-chips">
+      <button class="chat-chip" onclick="sendChip(this)">What does my eGFR mean?</button>
+      <button class="chat-chip" onclick="sendChip(this)">Which markers are abnormal?</button>
+      <button class="chat-chip" onclick="sendChip(this)">What should I eat?</button>
+      <button class="chat-chip" onclick="sendChip(this)">Should I see a doctor?</button>
+    </div>
+    <div class="chat-input-row">
+      <input type="text" id="chat-input" class="chat-input" placeholder="Ask about your report..." autocomplete="off"/>
+      <button class="chat-send-btn" id="chat-send-btn" onclick="sendChatMessage()">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2L7 9"/><path d="M14 2l-5 12-2-5-5-2 12-5z"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 </body>
 </html>

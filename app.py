@@ -7,7 +7,10 @@ import os
 import logging
 import joblib
 import pandas as pd
-from flask import Flask, render_template, request
+from dotenv import load_dotenv
+from flask import Flask, render_template, request, jsonify
+
+load_dotenv()  # loads .env file into os.environ
 
 # ── OCR package ──────────────────────────────────────────────────────────────
 from ocr import configure_tesseract, ocr_text, extract_cbc, extract_cbc_consensus, load_image, ocr_file
@@ -314,7 +317,7 @@ def _run_ocr_from_request(report_file):
 
     if cbc:
         logger.info(f"[OCR] Extracted (consensus): {cbc}")
-    return cbc, pdf_warning
+    return cbc, pdf_warning, text
 
 
 # ── STEP 1: Upload → OCR → Editable review form ───────────────────────────────
@@ -328,7 +331,7 @@ def review():
     age = request.form.get("age", "")
     bp  = request.form.get("bp",  "")
 
-    cbc, pdf_warning = _run_ocr_from_request(request.files.get("report"))
+    cbc, pdf_warning, raw_ocr_text = _run_ocr_from_request(request.files.get("report"))
 
     # Each field: form key, display label, unit, CBC dict key, fallback default
     FIELDS = [
@@ -360,6 +363,7 @@ def review():
         age=age,
         bp=bp,
         pdf_warning=pdf_warning,
+        raw_ocr_text=raw_ocr_text,
     )
 
 
@@ -369,6 +373,7 @@ def predict():
     # All values come from the review form — user has already verified them
     age = float(request.form.get("age") or 0)
     bp  = float(request.form.get("bp")  or 0)
+    raw_ocr_text = request.form.get("raw_ocr_text", "")
 
     def _f(key, default):
         v = request.form.get(key, "").strip()
@@ -485,7 +490,100 @@ def predict():
         age=int(age), bp=int(bp),
         markers=markers, tips=tips, score_val=score,
         egfr=egfr, ckd_stage_info=ckd_stage_info,
+        raw_ocr_text=raw_ocr_text,
     )
+
+# ── CHATBOT ───────────────────────────────────────────────────────────────────
+try:
+    from groq import Groq
+    _groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+except Exception as e:
+    logger.warning(f"[CHAT] Groq client init failed: {e}")
+    _groq_client = None
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    """AI chatbot endpoint powered by Groq (Llama 3.3 70B)."""
+    if not _groq_client:
+        return jsonify(reply="Chatbot is unavailable. Please set the GROQ_API_KEY environment variable."), 503
+
+    data = request.get_json(force=True)
+    user_msg = (data.get("message") or "").strip()
+    history = data.get("history") or []
+    ctx = data.get("report_context") or {}
+
+    if not user_msg:
+        return jsonify(reply="Please type a question about your report."), 400
+
+    # Build system prompt with full patient context
+    markers_text = ""
+    for m in ctx.get("markers", []):
+        markers_text += (f"  - {m['name']}: {m['value']} {m['unit']} "
+                         f"(normal: {m['normal']}), status: {m['status']}, "
+                         f"source: {m.get('source','unknown')}\n")
+
+    tips_text = "\n".join(f"  - {t}" for t in ctx.get("tips", []))
+
+    # Get raw report text (full OCR output from uploaded lab report)
+    raw_report = ctx.get("raw_report_text", "")
+    # Truncate to ~4000 chars to stay within context limits
+    if len(raw_report) > 4000:
+        raw_report = raw_report[:4000] + "\n... [truncated]"
+
+    system_prompt = f"""You are KidneyIQ Assistant, a helpful and empathetic medical information chatbot.
+You are speaking with a patient who has just received their lab report and kidney health analysis.
+You have access to BOTH the full raw text from their uploaded lab report AND the processed analysis results.
+Answer questions about ANY value present in their lab report — not just the kidney-specific markers.
+This includes CBC values, liver function tests, lipid profile, thyroid, vitamins, or any other test result visible in the raw report text.
+Be clear, supportive, and use simple language a patient can understand.
+Always remind them to consult their doctor for medical decisions.
+Do NOT diagnose. Do NOT prescribe medication. You may explain what values mean and suggest lifestyle tips.
+Keep responses concise (3-5 sentences unless they ask for detail).
+
+--- FULL LAB REPORT (RAW TEXT FROM UPLOADED DOCUMENT) ---
+{raw_report if raw_report else "No raw report text available — the patient entered values manually."}
+--- END RAW REPORT ---
+
+--- KIDNEYIQ ANALYSIS RESULTS ---
+Age: {ctx.get('age', 'N/A')} years
+Blood Pressure (diastolic): {ctx.get('bp', 'N/A')} mmHg
+Kidney Health Score: {ctx.get('score', 'N/A')}/100 (Grade {ctx.get('grade', 'N/A')} - {ctx.get('status', 'N/A')})
+eGFR: {ctx.get('egfr', 'N/A')} mL/min
+CKD Stage: {ctx.get('ckd_stage', 'N/A')} ({ctx.get('ckd_stage_desc', 'N/A')})
+CKD Detected: {ctx.get('ckd_detected', 'N/A')}
+CKD Probability: {ctx.get('ckd_prob', 'N/A')}%
+Model Confidence: {ctx.get('confidence', 'N/A')}%
+
+Biomarkers (processed):
+{markers_text}
+Recommendations:
+{tips_text}
+--- END ANALYSIS ---
+"""
+
+    # Build messages list
+    messages = [{"role": "system", "content": system_prompt}]
+    for turn in history[-20:]:  # keep last 20 turns to stay within context
+        role = turn.get("role", "user")
+        content = turn.get("content", "")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_msg})
+
+    try:
+        resp = _groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=0.6,
+            max_tokens=600,
+        )
+        reply = resp.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"[CHAT] Groq API error: {e}")
+        reply = "I'm sorry, I encountered an error processing your request. Please try again."
+
+    return jsonify(reply=reply)
 
 
 if __name__ == "__main__":
